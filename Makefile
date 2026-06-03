@@ -75,7 +75,7 @@ VAULT_PATH      := $(if $(HERMES_VAULT_PATH),$(HERMES_VAULT_PATH),$(HOME)/Docume
 .PHONY: all init check-env build-engine setup-venv fetch-model fetch-embed-model \
         install-daemon install-engine-daemon install-embed-daemon install-watcher-daemon \
         install-cli uninstall-cli \
-        start-daemon stop-daemon clean-cache uninstall help \
+        start-daemon stop-daemon clean-cache uninstall doctor test help \
         bench bench-setup bench-throughput bench-perplexity bench-power bench-report
 
 # Default: full installation pipeline end-to-end. install-daemon installs
@@ -119,6 +119,8 @@ help:
 	@echo "  make clean-cache         Wipe storage/slots/* (KV slot caches)."
 	@echo "  make uninstall           launchctl bootout + remove all three plists."
 	@echo "                           Models and storage/ are kept on disk."
+	@echo "  make doctor              End-to-end self-diagnostic with remediation."
+	@echo "  make test                Run the pytest suite (pure-Python; no daemons)."
 	@echo ""
 	@echo "  make bench               Throughput + perplexity vs MLX 4-bit (no sudo)."
 	@echo "  make bench-power         powermetrics power suite (asks for sudo)."
@@ -440,6 +442,20 @@ clean-cache:
 	@mkdir -p "$(SLOTS_DIR)"
 	@echo "    slots dir reset: $(SLOTS_DIR)"
 
+# ----- doctor ---------------------------------------------------------------
+# Run the end-to-end self-diagnostic. Routes through bin/hermes so it works
+# whether the venv exists or not (doctor is stdlib-only, see src/doctor.py).
+# Exits non-zero on FAIL so `make doctor && make start-daemon` is safe.
+
+doctor:
+	@"$(WORKING_DIR)/bin/hermes" doctor
+
+# ----- test -----------------------------------------------------------------
+# Run the pytest suite. Pure-Python tests; no daemons or network needed.
+
+test:
+	@"$(VENV_PY)" -m pytest tests/ -v
+
 # ----- uninstall ------------------------------------------------------------
 
 uninstall:
@@ -486,10 +502,13 @@ bench-perplexity: bench-setup
 	@cd "$(WORKING_DIR)" && "$(BENCH_MLX_PY)" -m bench.bench_perplexity --backend mlx
 
 bench-power:
-	@echo "==> bench-power: requires sudo (powermetrics)"
-	@echo "    running llama_cpp + mlx on the medium prompt"
-	sudo "$(BENCH_DIR)/bench_power.sh" llama_cpp medium_summary
-	sudo "$(BENCH_DIR)/bench_power.sh" mlx       medium_summary
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "ERROR: bench-power needs root. Run: sudo make bench-power"; \
+		exit 1; \
+	fi
+	@echo "==> bench-power: powermetrics suite (running as root)"
+	"$(BENCH_DIR)/bench_power.sh" llama_cpp medium_summary
+	"$(BENCH_DIR)/bench_power.sh" mlx       medium_summary
 
 bench-report:
 	@cd "$(WORKING_DIR)" && "$(VENV_PY)" -m bench.aggregate

@@ -1,9 +1,10 @@
 """hermes-metal command-line interface.
 
-Three subcommands:
+Subcommands:
     hermes ask "<question>"     RAG: embed -> LanceDB top-k -> chat (streaming).
     hermes search "<query>"     Retrieval only; prints matched chunks + sources.
     hermes status               Health probes both servers and prints index stats.
+    hermes doctor               End-to-end self-diagnostic with remediation.
 
 Resolves config from environment variables (HERMES_CHAT_URL, HERMES_EMBED_URL,
 HERMES_LANCEDB_PATH) so it works whether the daemons are running locally or
@@ -12,10 +13,20 @@ the user has pointed it at a remote box.
 from __future__ import annotations
 
 import argparse
+import sys
+
+
+# `hermes doctor` is the one subcommand that must keep working when imports
+# from src.backend (lancedb, pyarrow, httpx) fail — that's exactly when users
+# reach for it. Route to src.doctor before any heavy import happens.
+if len(sys.argv) >= 2 and sys.argv[1] == "doctor":
+    from src import doctor as _doctor
+    sys.exit(_doctor.run(sys.argv[2:]))
+
+
 import asyncio
 import json
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -231,7 +242,8 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="hermes",
         description="Local-first second-brain CLI (hermes-metal).",
     )
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # cmd is OPTIONAL: bare `hermes` drops into the REPL (handled in main()).
+    sub = p.add_subparsers(dest="cmd")
 
     ask = sub.add_parser("ask", help="RAG: retrieve from vault and chat (streaming).")
     ask.add_argument("question", help="Natural-language question.")
@@ -250,11 +262,93 @@ def _build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="Probe both servers and show index size.")
     status.set_defaults(func=_cmd_status)
 
+    # `doctor` is intercepted before module-level imports (see top of file) so
+    # it works when src.backend imports fail. This entry only exists so the
+    # subcommand shows up in `hermes --help`.
+    doctor = sub.add_parser(
+        "doctor",
+        help="Self-diagnostic: host, build, models, agents, servers, index.",
+    )
+    doctor.add_argument("--json", action="store_true",
+                        help="emit machine-readable JSON instead of the report.")
+    doctor.set_defaults(func=lambda _a: _run_doctor_late())
+
+    repl = sub.add_parser("repl", help="Interactive multi-turn RAG chat (default if no subcommand).")
+    repl.add_argument("--no-rag", action="store_true", help="start with RAG disabled.")
+    repl.add_argument("-k", type=int, default=DEFAULT_K,
+                      help=f"top-k chunks per turn (default {DEFAULT_K}).")
+    repl.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
+                      help=f"max response tokens per turn (default {DEFAULT_MAX_TOKENS}).")
+    repl.set_defaults(func=_cmd_repl)
+
+    index = sub.add_parser(
+        "index",
+        help="Backfill / GC the vault index (one-shot, complementary to the live watcher).",
+    )
+    index.add_argument("--backfill", action="store_true",
+                       help="Index files not yet in the index.")
+    index.add_argument("--force", action="store_true",
+                       help="With --backfill: re-embed every file regardless of state.")
+    index.add_argument("--gc", action="store_true",
+                       help="Remove index rows whose source file is gone or now excluded.")
+    index.add_argument("--dry-run", action="store_true",
+                       help="With --gc: show what would be removed without removing.")
+    index.add_argument("--limit", type=int, default=None,
+                       help="Process at most N files.")
+    index.set_defaults(func=_cmd_index)
+
     return p
 
 
+def _run_doctor_late() -> int:
+    # Reachable only if the user passes `doctor` after some other command has
+    # already triggered module-top imports (e.g. via Python `-c`). The normal
+    # `hermes doctor` path exits inside the early-route block at the top of
+    # this module and never gets here.
+    from src import doctor as _doctor
+    argv = sys.argv[2:] if len(sys.argv) > 2 else []
+    return _doctor.run(argv)
+
+
+def _cmd_index(args: argparse.Namespace) -> int:
+    from src import index_cmd
+    flags: list[str] = []
+    if args.backfill:
+        flags.append("--backfill")
+    if args.force:
+        flags.append("--force")
+    if args.gc:
+        flags.append("--gc")
+    if args.dry_run:
+        flags.append("--dry-run")
+    if args.limit is not None:
+        flags.extend(["--limit", str(args.limit)])
+    return index_cmd.run(flags)
+
+
+def _cmd_repl(args: argparse.Namespace) -> int:
+    from src import repl as _repl
+    session = _repl.ChatSession(
+        rag_enabled=not args.no_rag,
+        k=args.k,
+        max_tokens=args.max_tokens,
+        context_window=_repl._read_context_window_default(),
+    )
+    _repl._setup_readline()
+    try:
+        return asyncio.run(_repl._async_run(session))
+    finally:
+        _repl._save_readline_history()
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    # Bare `hermes` (no subcommand) → drop into REPL with defaults. We don't
+    # mark `cmd` required so we can implement this fall-through cleanly.
+    if args.cmd is None:
+        from src import repl as _repl
+        return _repl.run([])
     return args.func(args)
 
 

@@ -1,0 +1,32 @@
+# hermes-metal vault filter — copy to config/vault.yaml to activate.
+#
+# Globs are matched against paths RELATIVE to the vault root.
+#   * pattern without "/"  matches any path component
+#   * pattern with "/"     is anchored: matches the full relative path
+#
+# Resolution order: HERMES_VAULT_INCLUDE / HERMES_VAULT_EXCLUDE env vars
+# (colon-separated globs) > this file > built-in defaults
+# (src/backend/vault_filter.py:DEFAULT_INCLUDE / DEFAULT_EXCLUDE).
+#
+# An env override REPLACES, does not merge — keep the lists intentional.
+
+include:
+  - "*.md"
+  - "*.markdown"
+
+exclude:
+  - ".obsidian"
+  - ".obsidian/*"
+  - ".trash"
+  - ".trash/*"
+  - ".git"
+  - ".git/*"
+  - "attachments"
+  - "attachments/*"
+  - "_attachments"
+  - "_attachments/*"
+  - "templates"
+  - "templates/*"
+  - "Templates"
+  - "Templates/*"
+  - ".DS_Store"

@@ -16,11 +16,22 @@ while [ -L "$SOURCE" ]; do
 done
 REPO_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
 
-PYTHON="$REPO_ROOT/.venv/bin/python"
-if [[ ! -x "$PYTHON" ]]; then
-    echo "hermes: missing $PYTHON. Run 'make setup-venv' first." >&2
+VENV_PY="$REPO_ROOT/.venv/bin/python"
+
+# `doctor` is the one subcommand that must keep working when the venv is
+# broken — that's exactly when users reach for it. It is stdlib-only and
+# imports nothing from src/backend, so route it directly to system python3
+# whenever the venv isn't usable.
+if [[ "${1:-}" == "doctor" ]] && [[ ! -x "$VENV_PY" ]]; then
+    cd "$REPO_ROOT"
+    exec /usr/bin/env python3 -m src.doctor "${@:2}"
+fi
+
+if [[ ! -x "$VENV_PY" ]]; then
+    echo "hermes: missing $VENV_PY. Run 'make setup-venv' first," >&2
+    echo "        or 'hermes doctor' to diagnose the install." >&2
     exit 1
 fi
 
 cd "$REPO_ROOT"
-exec "$PYTHON" -m src.cli "$@"
+exec "$VENV_PY" -m src.cli "$@"

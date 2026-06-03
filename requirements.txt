@@ -21,3 +21,7 @@ watchdog>=6.0.0
 httpx>=0.28.1
 PyYAML>=6.0.2
 numpy>=2.1.0
+
+# Test dependency. Light enough to keep in the main requirements; the daemon
+# does not import it. `make test` runs the suite.
+pytest>=8.0.0

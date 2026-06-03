@@ -89,6 +89,22 @@ class LanceVault:
     def count(self) -> int:
         return self._table.count_rows()
 
+    def distinct_sources(self) -> list[str]:
+        """Return every distinct ``source_path`` currently in the table.
+
+        Used by ``hermes index --gc`` to find rows whose source file has
+        been deleted/moved out of the vault. ``to_arrow()`` ships with the
+        lancedb wheel; ``to_lance()`` would require pylance separately.
+        """
+        if self._table.count_rows() == 0:
+            return []
+        arrow_table = self._table.to_arrow()
+        seen: set[str] = set()
+        for v in arrow_table.column("source_path").to_pylist():
+            if v is not None:
+                seen.add(v)
+        return sorted(seen)
+
     def close(self) -> None:
         self._table = None
         self._db = None

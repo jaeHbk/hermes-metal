@@ -39,6 +39,8 @@ from watchdog.events import (
 )
 from watchdog.observers import Observer
 
+from src.backend.vault_filter import VaultFilter, build_filter
+
 if TYPE_CHECKING:  # pragma: no cover - import-time only
     from src.backend.database import LanceVault
 
@@ -85,9 +87,19 @@ class VaultWatcher(PatternMatchingEventHandler):
         vault: "LanceVault",
         embed_url: str,
         debounce_s: float = 5.0,
+        vfilter: VaultFilter | None = None,
     ) -> None:
+        # Derive watchdog patterns from the filter's include list so a user
+        # who configures HERMES_VAULT_INCLUDE="*.md:*.txt" gets .txt events
+        # delivered. Otherwise watchdog filters .txt at the OS-event layer and
+        # the live index would only catch them via `hermes index --backfill`.
+        # We DO NOT pre-filter slashed/non-slashless globs out: PatternMatching-
+        # EventHandler accepts only basename-style globs, but our filter's
+        # non-slashed patterns are exactly that, so the include list maps cleanly.
+        resolved_filter = vfilter or build_filter(Path(vault_path).expanduser().resolve())
+        watch_patterns = [p for p in resolved_filter.include if "/" not in p] or _MARKDOWN_PATTERNS
         super().__init__(
-            patterns=_MARKDOWN_PATTERNS,
+            patterns=watch_patterns,
             ignore_directories=True,
             case_sensitive=False,
         )
@@ -95,6 +107,10 @@ class VaultWatcher(PatternMatchingEventHandler):
         self.vault = vault
         self.embed_url = embed_url
         self.debounce_s = float(debounce_s)
+        # The pattern matcher above filters at the watchdog layer; the
+        # VaultFilter additionally enforces path excludes (.obsidian, .trash,
+        # attachments/, etc.) inside _schedule_index.
+        self.vfilter = resolved_filter
 
         # Per-path debounce state. Guarded by ``_timers_lock`` because watchdog
         # dispatches events on its observer thread while timers fire on their
@@ -118,6 +134,9 @@ class VaultWatcher(PatternMatchingEventHandler):
 
     def _schedule_index(self, path: str) -> None:
         """(Re)arm the per-path debounce timer for ``path``."""
+        if not self.vfilter.accepts(path):
+            logger.debug("filter rejected, skipping: %s", path)
+            return
         with self._timers_lock:
             existing = self._timers.pop(path, None)
             if existing is not None:
@@ -218,12 +237,12 @@ class VaultWatcher(PatternMatchingEventHandler):
             logger.exception("failed to delete index rows for %s", src)
         self._hashes.pop(src, None)
 
-        # Only re-index destinations that still match our markdown patterns.
+        # Only re-index destinations the user-configured filter accepts.
         # watchdog's PatternMatchingEventHandler filters src_path; on rename
         # the destination extension may differ (e.g. .md -> .tmp during a
-        # save), so check explicitly.
-        dst_lower = dst.lower()
-        if dst_lower.endswith(".md") or dst_lower.endswith(".markdown"):
+        # save), so consult the filter directly. _schedule_index also rechecks,
+        # but checking here avoids an empty-debounce noise log.
+        if self.vfilter.accepts(dst):
             self._schedule_index(dst)
 
 

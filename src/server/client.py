@@ -350,6 +350,14 @@ class HermesClient:
         """``POST /slots/{slot_id}?action=restore`` — reload a saved KV cache."""
         return await self._slot_action(slot_id, action="restore", filename=name)
 
+    async def slot_erase(self, slot_id: int, name: str) -> dict[str, Any]:
+        """``POST /slots/{slot_id}?action=erase`` — delete the saved KV cache file.
+
+        Used by ``/forget-cache`` in the REPL so the user can drop a stale
+        cache without touching the slot directory by hand.
+        """
+        return await self._slot_action(slot_id, action="erase", filename=name)
+
     async def _slot_action(
         self, slot_id: int, *, action: str, filename: str
     ) -> dict[str, Any]:
