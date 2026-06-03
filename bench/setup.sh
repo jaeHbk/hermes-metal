@@ -36,11 +36,12 @@ fi
 
 # Pin the MLX side. mlx-lm pulls in mlx + transformers + tokenizers as deps.
 # Versions verified 2026-06-03: mlx-lm 0.31.3 is the current PyPI release.
+# We don't pin numpy: mlx-lm declares only `numpy` (any version) and pinning
+# numpy<2.1 forces a source build on Python 3.14 (no cp314 wheels for 1.x).
 "$MLX_VENV/bin/pip" install --prefer-binary --upgrade \
     "mlx-lm>=0.31,<0.32" \
     "psutil>=5.9" \
-    "datasets>=2.18" \
-    "numpy<2.1"
+    "datasets>=2.18"
 
 # ---- daemon-venv extras for the llama.cpp side -------------------------------
 # The daemon's existing .venv already has httpx + numpy. We need psutil + datasets

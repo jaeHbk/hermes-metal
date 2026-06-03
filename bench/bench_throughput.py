@@ -54,12 +54,31 @@ def _peak_rss_bytes() -> int:
 
 # ---- llama.cpp backend (HTTP) ------------------------------------------------
 
+def _find_daemon_pid() -> int | None:
+    """
+    Locate the running llama-server (chat agent) PID. The bench process is
+    just an HTTP client — its RSS is irrelevant. The number we want is the
+    SERVER process's RSS, which holds the model weights + KV cache.
+    """
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            cmd = " ".join(p.info.get("cmdline") or [])
+        except (psutil.AccessDenied, psutil.NoSuchProcess):
+            continue
+        if "llama-server" in cmd and "8080" in cmd:
+            return p.info["pid"]
+    return None
+
+
 def run_llama_cpp(prompt: str, decode_tokens: int, seed: int) -> ThroughputRun:
     """
     Hits llama-server's native /completion endpoint with stream=true so we can
     capture wall-clock TTFT ourselves. Llama-server also reports timings in the
     final stream chunk under the `timings` key (prompt_n, prompt_ms, predicted_n,
     predicted_ms) which we cross-check against our wall measurement.
+
+    RSS is sampled from the daemon process (not the bench client), since the
+    server is what actually holds the model weights + KV cache.
     """
     import httpx  # daemon venv has it
 
@@ -74,8 +93,10 @@ def run_llama_cpp(prompt: str, decode_tokens: int, seed: int) -> ThroughputRun:
         "cache_prompt": False,  # fair comparison: no prompt-cache reuse on the bench
     }
 
-    proc = psutil.Process(os.getpid())
-    rss_baseline = proc.memory_info().rss
+    daemon_pid = _find_daemon_pid()
+    daemon_proc = psutil.Process(daemon_pid) if daemon_pid else None
+    rss_baseline = daemon_proc.memory_info().rss if daemon_proc else 0
+    rss_peak = rss_baseline
 
     t0 = time.perf_counter()
     ttft = None
@@ -101,6 +122,12 @@ def run_llama_cpp(prompt: str, decode_tokens: int, seed: int) -> ThroughputRun:
                     timings = chunk["timings"]
                 if chunk.get("content"):
                     n_decoded += 1  # rough; refined by server timings below
+                # Periodic daemon RSS sample (every ~32 chunks)
+                if daemon_proc and n_decoded and n_decoded % 32 == 0:
+                    try:
+                        rss_peak = max(rss_peak, daemon_proc.memory_info().rss)
+                    except psutil.NoSuchProcess:
+                        pass
 
     wall = time.perf_counter() - t0
 
@@ -116,7 +143,11 @@ def run_llama_cpp(prompt: str, decode_tokens: int, seed: int) -> ThroughputRun:
     prefill_tps = (prompt_n / prefill_s) if prefill_s > 0 else 0.0
     decode_tps = (predicted_n / decode_s) if decode_s > 0 else 0.0
 
-    rss_peak = max(proc.memory_info().rss, rss_baseline)
+    if daemon_proc:
+        try:
+            rss_peak = max(rss_peak, daemon_proc.memory_info().rss)
+        except psutil.NoSuchProcess:
+            pass
 
     return ThroughputRun(
         backend=LLAMA_CPP,
