@@ -1,0 +1,9 @@
+# Isolated venv for mlx-lm — kept out of repo and out of the daemon's runtime venv
+.venv-mlx/
+.venv/
+__pycache__/
+*.pyc
+
+# Benchmark outputs are timestamped and machine-specific; commit results manually
+results/
+*.log

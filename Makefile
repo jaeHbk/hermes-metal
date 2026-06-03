@@ -75,7 +75,8 @@ VAULT_PATH      := $(if $(HERMES_VAULT_PATH),$(HERMES_VAULT_PATH),$(HOME)/Docume
 .PHONY: all init check-env build-engine setup-venv fetch-model fetch-embed-model \
         install-daemon install-engine-daemon install-embed-daemon install-watcher-daemon \
         install-cli uninstall-cli \
-        start-daemon stop-daemon clean-cache uninstall help
+        start-daemon stop-daemon clean-cache uninstall help \
+        bench bench-setup bench-throughput bench-perplexity bench-power bench-report
 
 # Default: full installation pipeline end-to-end. install-daemon installs
 # all three LaunchAgents (engine, embed, watcher); see that target for the
@@ -118,6 +119,10 @@ help:
 	@echo "  make clean-cache         Wipe storage/slots/* (KV slot caches)."
 	@echo "  make uninstall           launchctl bootout + remove all three plists."
 	@echo "                           Models and storage/ are kept on disk."
+	@echo ""
+	@echo "  make bench               Throughput + perplexity vs MLX 4-bit (no sudo)."
+	@echo "  make bench-power         powermetrics power suite (asks for sudo)."
+	@echo "  make bench-report        Regenerate bench/results/REPORT.md."
 	@echo ""
 	@echo "  make help                This message."
 
@@ -448,3 +453,48 @@ uninstall:
 	@echo ""
 	@echo "    NOTE: models/ and storage/ are intentionally KEPT."
 	@echo "    To fully reset: rm -rf $(MODELS_DIR) $(STORAGE_DIR) $(LOGS_DIR) $(VENV_DIR)"
+
+# ----- bench ----------------------------------------------------------------
+#
+# Head-to-head benchmark vs MLX 4-bit on the same Hermes-3-8B. The MLX side
+# uses a SEPARATE venv (bench/.venv-mlx) so its torch / transformers chain
+# cannot drift the daemon's runtime stack. See bench/README.md.
+
+BENCH_DIR        := $(WORKING_DIR)/bench
+BENCH_MLX_VENV   := $(BENCH_DIR)/.venv-mlx
+BENCH_MLX_PY     := $(BENCH_MLX_VENV)/bin/python
+
+bench-setup:
+	@echo "==> bench-setup: provisioning $(BENCH_MLX_VENV)"
+	@bash "$(BENCH_DIR)/setup.sh"
+
+bench-throughput: bench-setup
+	@echo "==> bench-throughput: llama_cpp + mlx (both backends)"
+	@if ! curl -sf "$$( . $(ENGINE_FLAGS) && echo http://127.0.0.1:$$ENGINE_PORT )/health" >/dev/null 2>&1; then \
+		echo "ERROR: chat server not reachable. Run 'make start-daemon' first."; \
+		exit 1; \
+	fi
+	@cd "$(WORKING_DIR)" && "$(BENCH_MLX_PY)" -m bench.bench_throughput --backend both
+
+bench-perplexity: bench-setup
+	@echo "==> bench-perplexity: llama_cpp via llama-perplexity, mlx in-process"
+	@if [ ! -x "$(LLAMA_DIR)/build/bin/llama-perplexity" ]; then \
+		echo "    building llama-perplexity (one-time)"; \
+		cd "$(LLAMA_DIR)" && cmake --build build --config Release --target llama-perplexity -j; \
+	fi
+	@cd "$(WORKING_DIR)" && "$(VENV_PY)"      -m bench.bench_perplexity --backend llama_cpp
+	@cd "$(WORKING_DIR)" && "$(BENCH_MLX_PY)" -m bench.bench_perplexity --backend mlx
+
+bench-power:
+	@echo "==> bench-power: requires sudo (powermetrics)"
+	@echo "    running llama_cpp + mlx on the medium prompt"
+	sudo "$(BENCH_DIR)/bench_power.sh" llama_cpp medium_summary
+	sudo "$(BENCH_DIR)/bench_power.sh" mlx       medium_summary
+
+bench-report:
+	@cd "$(WORKING_DIR)" && "$(VENV_PY)" -m bench.aggregate
+	@echo "    open: bench/results/REPORT.md"
+
+# Default `make bench` skips power (sudo) — explicit gate via bench-power.
+bench: bench-throughput bench-perplexity bench-report
+	@echo "==> bench: done. For battery numbers run 'make bench-power' (asks sudo)."

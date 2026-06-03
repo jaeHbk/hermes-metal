@@ -59,6 +59,18 @@ Env-driven. Defaults work; override as needed.
 Hardware tier (context window, threads) is auto-detected via `sysctl` and
 written to `config/host_topology.env`. See `CLAUDE.md` for the full spec.
 
+## Benchmarks
+
+Head-to-head against MLX 4-bit on the same Hermes-3-8B — measures
+throughput, peak RSS, WikiText-2 perplexity, and joules-per-1k-tokens via
+`powermetrics`. See `bench/README.md`.
+
+```sh
+make bench              # throughput + perplexity (no sudo)
+make bench-power        # adds power telemetry (sudo)
+make bench-report       # write bench/results/REPORT.md
+```
+
 ## License
 
 MIT. See `LICENSE`.
