@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.metal.engine</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!--
+            llama.cpp's top-level Makefile now only emits an $(error ...) and the
+            CMake build is the sole supported path, which places the server binary
+            at build/bin/llama-server (verified against ggml-org/llama.cpp docs/build.md).
+            CLAUDE.md references the legacy path .../llama.cpp/llama-server; this template
+            uses the cmake output path so the daemon can actually launch the binary.
+        -->
+        <string>{WORKING_DIR}/third_party/llama.cpp/build/bin/llama-server</string>
+        <string>-m</string>
+        <string>{MODEL_PATH}</string>
+        <!-- Lock the listener to loopback so the second-brain daemon never binds 0.0.0.0. -->
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>{ENGINE_PORT}</string>
+        <!-- {CONTEXT_TOKENS} filled by the Makefile from host_topology.env (8192 base / 32768 pro). -->
+        <string>-c</string>
+        <string>{CONTEXT_TOKENS}</string>
+        <!-- {THREAD_COUNT} filled by the Makefile from host_topology.env per Tier matrix. -->
+        <string>-t</string>
+        <string>{THREAD_COUNT}</string>
+        <!--
+            Flash attention on Metal is a runtime flag, not a CMake build flag.
+            llama-server defines `-fa, --flash-attn [on|off|auto]` (default auto);
+            pass `on` explicitly for daemon determinism.
+        -->
+        <string>-fa</string>
+        <string>on</string>
+        <!--
+            Quantized V cache REQUIRES flash attention (llama.cpp PR #7527 asserts
+            `error if type_v != FP16 and not flash_attn`). With -fa on this is safe.
+        -->
+        <string>-ctk</string>
+        <string>{CACHE_TYPE_K}</string>
+        <string>-ctv</string>
+        <string>{CACHE_TYPE_V}</string>
+        <!--
+            CLAUDE.md §2 specifies persistent prompt states. `--prompt-cache <file>`
+            is a llama-cli flag (LLAMA_EXAMPLE_COMPLETION) and is NOT registered for
+            llama-server; passing it would crash arg parsing and trigger a restart loop.
+            llama-server's equivalent persistence is per-slot KV save/restore via
+            --slot-save-path PATH plus POST /slots/{id}?action=save|restore endpoints.
+        -->
+        <string>--slot-save-path</string>
+        <string>{WORKING_DIR}/{SLOT_SAVE_PATH}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{WORKING_DIR}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+        KeepAlive=true matches CLAUDE.md's "always-on second brain" intent. Note that
+        launchd will respawn after ANY exit (including a clean `launchctl unload`);
+        operators should `launchctl bootout` to stop the agent cleanly.
+    -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!--
+        Default ThrottleInterval is 10s per launchd.plist(5). Held at 10 per the
+        project spec; consider raising to 30s if crash-loops on a corrupt model
+        file are observed in practice.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <!--
+        ProcessType=Background applies macOS QoS-class CPU + I/O throttling intended
+        to prevent disruption of foreground UI. Apple's launchd.plist(5) explicitly
+        states this classification "is preferable to using the HardResourceLimits,
+        SoftResourceLimits and Nice keys." Paired with Nice=15 per spec for
+        belt-and-suspenders scheduler de-prioritization.
+    -->
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>{WORKING_DIR}/logs/engine.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{WORKING_DIR}/logs/engine.err</string>
+
+    <!--
+        GGML_METAL_PATH_RESOURCES is intentionally NOT set: with the cmake build,
+        GGML_METAL_EMBED_LIBRARY defaults to ON on Apple Silicon, so the Metal
+        shader library is embedded into the binary via .incbin and the env var
+        is only consulted on the non-embedded fallback path.
+    -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

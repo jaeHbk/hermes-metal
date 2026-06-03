@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.metal.embed</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{WORKING_DIR}/third_party/llama.cpp/build/bin/llama-server</string>
+        <string>-m</string>
+        <string>{EMBED_MODEL_PATH}</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>{EMBED_PORT}</string>
+        <string>--embedding</string>
+        <!--
+            nomic-embed-text-v1.5 is a mean-pooled sentence encoder; explicit
+            pooling=mean prevents accidental token-level outputs if upstream
+            ever changes the default.
+        -->
+        <string>--pooling</string>
+        <string>mean</string>
+        <!--
+            8192 is the model's native context. The embedding server stays small
+            and stateless, so we don't need the host_topology-driven CONTEXT_TOKENS
+            here.
+        -->
+        <string>-c</string>
+        <string>8192</string>
+        <string>-t</string>
+        <string>{THREAD_COUNT}</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{WORKING_DIR}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>{WORKING_DIR}/logs/embed.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{WORKING_DIR}/logs/embed.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+</dict>
+</plist>

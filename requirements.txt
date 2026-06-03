@@ -1,0 +1,23 @@
+# hermes-metal Python runtime dependencies.
+#
+# Architecture note: hermes-metal does NOT load llama.cpp in-process. The chat
+# and embedding engines run as separate `llama-server` processes (built from
+# the third_party/llama.cpp submodule via CMake + Metal) and we talk to them
+# over their OpenAI-compatible HTTP API on localhost:8080 / :8081. That means
+# we deliberately do NOT depend on `llama-cpp-python` (or the nonexistent
+# `minimal-llama-bindings`) — a plain HTTP client (httpx) is sufficient and
+# keeps the Python side wheel-only / arm64-pure.
+#
+# All packages below have native macosx_*_arm64 wheels for the major Python
+# versions. The Makefile installs with `--prefer-binary` (NOT
+# `--only-binary=:all:`) so that small pure-or-near-pure C-extension packages
+# like watchdog can build from source on bleeding-edge Python (e.g. 3.14)
+# where prebuilt wheels haven't shipped yet, while heavy packages (lancedb,
+# pyarrow, numpy) still resolve to wheels.
+
+lancedb>=0.33.0
+pyarrow>=18.0.0
+watchdog>=6.0.0
+httpx>=0.28.1
+PyYAML>=6.0.2
+numpy>=2.1.0

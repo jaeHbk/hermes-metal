@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# hermes — thin wrapper that runs src/cli.py with the project's venv Python.
+#
+# Resolves the repo root from the script's own location so the wrapper works
+# whether invoked directly, via PATH, or through a symlink (`make install-cli`
+# drops one in /usr/local/bin).
+set -euo pipefail
+
+# Follow symlinks so /usr/local/bin/hermes -> repo/bin/hermes still resolves
+# the repo root correctly.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+REPO_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+
+PYTHON="$REPO_ROOT/.venv/bin/python"
+if [[ ! -x "$PYTHON" ]]; then
+    echo "hermes: missing $PYTHON. Run 'make setup-venv' first." >&2
+    exit 1
+fi
+
+cd "$REPO_ROOT"
+exec "$PYTHON" -m src.cli "$@"

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+models/*.gguf
+storage/
+logs/
+third_party/llama.cpp/build/
+config/host_topology.env
+.env

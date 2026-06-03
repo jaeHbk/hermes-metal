@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.metal.watcher</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>{WORKING_DIR}/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.daemon.watcher</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{WORKING_DIR}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+        Restart only on abnormal exit so an explicit `launchctl bootout`
+        actually stops the process. SIGTERM is handled gracefully (exit 0)
+        by src/daemon/watcher.py.
+    -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>20</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>{WORKING_DIR}/logs/watcher.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{WORKING_DIR}/logs/watcher.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>PYTHONPATH</key>
+        <string>{WORKING_DIR}</string>
+        <key>HERMES_VAULT_PATH</key>
+        <string>{VAULT_PATH}</string>
+        <key>HERMES_LANCEDB_PATH</key>
+        <string>{WORKING_DIR}/storage/lancedb</string>
+        <key>HERMES_EMBED_URL</key>
+        <string>http://127.0.0.1:{EMBED_PORT}/v1/embeddings</string>
+    </dict>
+</dict>
+</plist>
