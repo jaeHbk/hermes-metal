@@ -23,6 +23,19 @@ if len(sys.argv) >= 2 and sys.argv[1] == "doctor":
     from src import doctor as _doctor
     sys.exit(_doctor.run(sys.argv[2:]))
 
+# `hermes notify` is similarly stdlib-only and independent of the daemons.
+# Keep it bootable even when the venv's lancedb/httpx are broken so a user
+# whose chat server is down can still set up their phone notifications.
+# Wrap in a try/except KeyboardInterrupt because `--setup` calls input()
+# and the user pressing ^C mid-prompt should exit cleanly, not traceback.
+if len(sys.argv) >= 2 and sys.argv[1] == "notify":
+    from src import notify as _notify
+    try:
+        sys.exit(_notify.run(sys.argv[2:]))
+    except KeyboardInterrupt:
+        print("\nhermes notify: interrupted.", file=sys.stderr)
+        sys.exit(130)
+
 
 import asyncio
 import json
@@ -280,6 +293,17 @@ def _build_parser() -> argparse.ArgumentParser:
     repl.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS,
                       help=f"max response tokens per turn (default {DEFAULT_MAX_TOKENS}).")
     repl.set_defaults(func=_cmd_repl)
+
+    # Intercepted at the top of the module before heavy imports — see the
+    # `if sys.argv[1] == "notify"` block. This entry exists only so the
+    # subcommand shows up in `hermes --help`. Detailed flag definitions live
+    # in src/notify.py to avoid drift from a duplicate definition here.
+    sub.add_parser(
+        "notify",
+        help="Send a Telegram message, or run --setup / --check. "
+             "(See `hermes notify --help` for flags.)",
+        add_help=False,  # actual help comes from notify's own parser
+    )
 
     index = sub.add_parser(
         "index",

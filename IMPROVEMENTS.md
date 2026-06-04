@@ -8,6 +8,68 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-04 — Telegram notification transport (Phase A of daily-summary cascade)
+
+**Problem:** No way for the agent to push anything off the local machine.
+Daily-summary plans, alarms, and any future "your bot pinged you" feature
+all needed a wire-level primitive first. Picked Telegram over ntfy or
+webhook because it has a real iOS/Android client, supports bot DMs as a
+private channel, and authenticates per-bot rather than per-topic.
+
+**Change:** `src/notify.py` (~530 lines, **stdlib-only**, urllib +
+plistlib + json). New `hermes notify` subcommand:
+
+- `hermes notify "<msg>"` — send a chat message; chunks on paragraph
+  boundaries with `(i/n)` pagination footers when over Telegram's 4096-
+  char cap. Refuses empty input (Telegram 400s on empty `text`).
+- `hermes notify --setup` — interactive flow: prompts for the BotFather
+  token, validates it via `getMe`, asks the user to DM the bot, captures
+  the chat_id by long-polling `getUpdates`, writes
+  `~/.hermes/telegram.json` (mode 0600), sends a confirmation message.
+- `hermes notify --check` — validates token + chat against `getMe` /
+  `getChat`. Exit 0 OK, 1 configured-but-broken, 2 unconfigured.
+
+Config precedence is env > file (per-key, so `HERMES_TELEGRAM_BOT_TOKEN`
+in env + chat_id in file is supported). `send_document` shipped now for
+Phase D's full-summary attachment use case. Doctor gains a Notifications
+section (SKIP when unconfigured — notifications are optional — OK / FAIL
+when configured).
+
+Adversarial review (3 parallel subagents) caught 9 real bugs, all fixed:
+
+- `poll_for_chat_id` never advanced offset when returning a chat → next
+  process run replayed the same backlog forever. Now bumps offset across
+  the whole batch and best-effort acks before returning.
+- Empty-string `send` produced `[""]` → Telegram 400. Now returns 0
+  chunks and `send` raises explicitly.
+- `send_document` filename injected raw into `Content-Disposition`. A
+  filename with `"` or `\r\n` could corrupt the multipart frame or
+  inject headers. Added `_sanitize_filename`.
+- `--check "ignored"` silently dropped the stray positional. Now errors.
+- Doctor's `except notify.NotConfiguredError` after `is_configured()` was
+  unreachable. Removed.
+- Doctor's `except ImportError` did NOT catch `SyntaxError` — a typo in
+  notify.py would crash doctor entirely. Now catches both.
+- `_run_notify_late` was unreachable in normal flow + duplicated the
+  notify subparser definition (drift risk). Removed both; the early-
+  route in cli.py is the only live path.
+- Early-route had no `KeyboardInterrupt` guard, so ^C during `--setup`
+  printed a traceback. Now exits 130 cleanly.
+- Several test gaps (chat-not-found path, negative chat_id, offset
+  advancement, send_document) closed.
+
+**Files:** `src/notify.py`, `src/cli.py` (early-route + slimmed
+subparser), `src/doctor.py` (`check_notifications`),
+`tests/test_notify.py` (36 tests).
+
+**Impact:** Phase A wire is proven — both unit-tested (36 passing) and
+exercisable end-to-end via `hermes notify --setup`. Unblocks the Phase
+B/C/D cascade for daily summaries: temporal awareness, schema upgrade
+with rerank, and the actual summarizer can now plug into a working
+delivery primitive.
+
+---
+
 ## Proposed
 
 Things on the table but not yet built. Each entry names the **gap** (what
@@ -19,68 +81,67 @@ Promotion rule: when something here ships, move it down into a dated
 section above and rewrite to past tense. If it stops being a good idea,
 delete it — don't let this list ossify into a wishlist museum.
 
-### Retrieval quality (rerank + richer metadata)
+### Daily-summary push (cascade B → C → D → E)
 
-**Gap:** Distances on real queries cluster in `0.94–1.08` — barely better
-than random. The model is grounded by retrievals, so weak retrieval
-caps answer quality regardless of model size.
+**Gap:** User wants a daily Telegram message summarizing yesterday's
+notes, what was learned, practice questions for class material, and
+open questions. Phase A (Telegram transport) shipped 2026-06-04; the
+remaining phases follow in order because each enables the next.
 
-**Sketch:**
-- Declare the LanceDB vector column with `metric="cosine"` (or `"dot"`,
-  since nomic embeddings are L2-normalized) instead of the current
-  default L2.
-- Store more per-chunk metadata: `mtime` (for recency boost),
-  `heading_trail` (`"# Auth > ## Token storage"`), `tags` (frontmatter +
-  inline `#tag`).
-- Two-stage retrieval: top-20 by vector, then a small reranker pass —
-  either a local cross-encoder (`bge-reranker-base` is ~280 MB) or a
-  heuristic combining vector score, mtime decay, and heading-trail
-  match against query terms.
+**Sketch (multi-phase):**
 
-**Risk:** A cross-encoder doubles per-query latency in the REPL.
-Heuristic-only reranking is cheaper but less robust. Schema change
-requires a `--force` reindex; current users would need to rerun
-`hermes index --backfill --force`. Migration story matters.
+- **Phase B — temporal awareness.** Inject `Today is YYYY-MM-DD
+  (Weekday)` into REPL/ask system prompt. Cheap query-time parser
+  (`yesterday`, `last week`, explicit dates) adds a `where source_path
+  LIKE '%YYYY-MM-DD%'` filter. Configurable daily-note glob in
+  `config/vault.yaml` since users use different schemes. Enables
+  Phase D's "yesterday's activity" section to actually find yesterday.
 
-### Cross-session conversation memory
+- **Phase C — metadata-rich schema (the migration).** Add `mtime`,
+  `heading_trail`, `tags` columns to LanceDB. Switch vector metric to
+  `cosine` (nomic embeddings are L2-normalized; current default L2 is
+  measurably worse). Top-20 → reranker → top-5 — either local cross-
+  encoder (`bge-reranker-base` ~280 MB) or heuristic combining vector
+  score + mtime decay + heading-trail term match. Doctor adds a
+  schema-version check; `hermes index --migrate` runs the
+  `--backfill --force` for users on the old schema.
 
-**Gap:** `/save` and `/load` are manual. Users can't say "what did we
-decide last week about the auth rewrite?" and have the REPL pull from
-prior conversations.
+- **Phase D — `hermes summary` + scheduled delivery.** New
+  `src/summary.py` and `hermes summary [--date YYYY-MM-DD] [--dry-run]
+  [--no-push]`. Walks vault for files with `mtime` in window. Builds
+  sections: yesterday's activity, learnings (conceptual extracts),
+  practice questions (gated on class-tag/path detection), open
+  questions (TODOs and `?` lines surfaced from yesterday). Sends a
+  short headline via `notify.send` + full markdown via
+  `notify.send_document`. New `com.hermes.metal.summarizer.plist`
+  LaunchAgent with `StartCalendarInterval`; `make
+  install-summarizer-daemon` target. Idempotency state at
+  `storage/summarizer/last_sent.json` (manual `hermes summary` after
+  cron fired won't double-send unless `--force`).
 
-**Sketch:**
-- New LanceDB table (`conversations`) with a row per assistant turn,
-  embedded the same way as vault chunks.
-- REPL automatically appends each completed (user, assistant) pair on
-  exit, gated on a minimum length so trivia doesn't pollute the index.
-- Each turn's retrieval pulls top-k from BOTH `vault_chunks` and
-  `conversations`, with conversations cited differently (e.g.
-  `[chat:2026-05-28]` vs `[Welcome.md]`).
+- **Phase E — cross-session conversation memory (optional).** New
+  `conversations` LanceDB table keyed off Phase C's metadata schema.
+  REPL appends each (user, assistant) pair on exit. Phase D's summary
+  then includes "yesterday's REPL chats" alongside vault changes.
 
-**Risk:** The conversation table grows monotonically; no GC story
-yet. Privacy posture changes — users may not expect every chat to be
-indexed forever. Needs an opt-out flag and a `hermes index --gc-chats
---older-than 90d`.
+**Risk:**
+- Phase B misparses produce overconfident wrong answers; cap to high-
+  precision phrases and fall through to vector search otherwise.
+- Phase C requires `--backfill --force` for existing users. Migration
+  story is the load-bearing piece — get it wrong and users either
+  silently run on old schema or have to wait through a full reindex
+  with no warning.
+- Phase D's privacy posture: pushing summarized vault contents to
+  Telegram daily is a real choice. Default-off; requires explicit
+  config; doctor warns when push is configured ("this will send
+  vault summaries to Telegram daily").
+- Phase E's conversation table grows monotonically; needs `hermes
+  index --gc-chats --older-than 90d` from day one or it'll metastasize.
 
-### Daily-note temporal awareness
-
-**Gap:** Model has no idea what "yesterday", "this week", or "last
-month" means. Obsidian users live in dated daily notes; queries that
-hinge on time are answered by accident or not at all.
-
-**Sketch:**
-- Inject `Today is YYYY-MM-DD (Weekday)` into the system prompt at
-  REPL/ask startup.
-- Cheap query-time temporal parser (`yesterday` → date filter,
-  `last week` → date range) that adds a LanceDB `where` clause on
-  `source_path` matching daily-note filename conventions
-  (`YYYY-MM-DD.md`, `YYYY/MM/YYYY-MM-DD.md`).
-- Configurable daily-note glob in `config/vault.yaml` since not all
-  users use the same scheme.
-
-**Risk:** Misparsing temporal phrases produces overconfident wrong
-answers. Limit to high-precision phrases (`yesterday`, `today`, `this
-week`, explicit dates) and fall through to vector search otherwise.
+**Time-to-first-shipped if linear:** 3–4 weeks of careful work. A
+crude "summary v0" path right after Phase B (mtime-walk + existing
+chunker, no schema changes) ships sooner; quality iterates afterward
+through C.
 
 ### Watcher observability (`hermes status --watch`)
 

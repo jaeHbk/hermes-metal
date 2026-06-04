@@ -641,6 +641,66 @@ def _summary_line(sections: list[Section]) -> tuple[str, str]:
 # --------------------------------------------------------------------- run
 
 
+def check_notifications() -> Section:
+    """Validate the Telegram bot config, if any.
+
+    Notifications are optional: when not configured we emit SKIP, not FAIL,
+    so a user who never set up Telegram doesn't see red. When configured,
+    we hit getMe and getChat to confirm the token and chat are both alive.
+    """
+    s = Section("Notifications (Telegram)")
+    # Catch BOTH ImportError and SyntaxError — a typo in src/notify.py
+    # raises SyntaxError on import, and we must NOT take down the rest of
+    # doctor (the user is probably running it to find that very breakage).
+    try:
+        from src import notify
+    except (ImportError, SyntaxError) as exc:
+        s.add(Result("notify module", FAIL, f"src.notify failed to import: {exc}",
+                     fix="check src/notify.py — likely a syntax / import error."))
+        return s
+
+    if not notify.is_configured():
+        # Note: a partial config (token but no chat_id, or vice versa) lands
+        # here too — `is_configured()` is True only when load_config()
+        # succeeds. So unconfigured AND partial-config both SKIP from the
+        # user's perspective; the remediation hint covers both cases.
+        s.add(Result(
+            "telegram", SKIP,
+            "no bot configured (HERMES_TELEGRAM_BOT_TOKEN unset and no ~/.hermes/telegram.json)",
+            fix="hermes notify --setup   # optional; required only if you want push notifications.",
+        ))
+        return s
+
+    # is_configured() returned True, so load_config() cannot raise here —
+    # but we keep the call (no try/except) so any future divergence between
+    # is_configured() and load_config() shows up as a real traceback rather
+    # than masking it as SKIP.
+    cfg = notify.load_config()
+
+    try:
+        bot = notify.validate_token(cfg.bot_token)
+    except notify.NotifyError as exc:
+        s.add(Result("telegram token", FAIL, str(exc),
+                     fix="hermes notify --setup   # token may have been revoked by BotFather."))
+        return s
+    s.add(Result("telegram token", OK, f"bot @{bot.get('username','?')}"))
+
+    try:
+        chat = notify.validate_chat(cfg.bot_token, cfg.chat_id)
+    except notify.NotifyError as exc:
+        s.add(Result("telegram chat", FAIL, str(exc),
+                     fix=f"open Telegram, DM @{bot.get('username','?')}, then re-run."))
+        return s
+    chat_label = (
+        chat.get("title")
+        or chat.get("username")
+        or chat.get("first_name")
+        or chat.get("type", "?")
+    )
+    s.add(Result("telegram chat", OK, f"chat_id={cfg.chat_id} ({chat_label})"))
+    return s
+
+
 def run_all() -> list[Section]:
     return [
         check_host(),
@@ -652,6 +712,7 @@ def run_all() -> list[Section]:
         check_agents(),
         check_servers(),
         check_index(),
+        check_notifications(),
     ]
 
 
