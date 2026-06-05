@@ -146,6 +146,124 @@ def test_format_context_truncates_at_max_chars():
     assert "gamma" not in out
 
 
+def test_file_command_writes_topic_page(tmp_path, monkeypatch, capsys):
+    """`/file foo` should write the last assistant turn to wiki/topics/foo.md."""
+    from src import wiki
+    from src.repl import _cmd_file
+    monkeypatch.setenv("HERMES_WIKI_PATH", str(tmp_path / "wiki"))
+    monkeypatch.delenv("HERMES_VAULT_PATH", raising=False)
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+
+    sess = ChatSession()
+    sess.last_user = "What is the capital of France?"
+    sess.last_assistant = "The capital of France is Paris."
+
+    _cmd_file(sess, "France-capital")
+    page = paths.topics_dir / "France-capital.md"
+    assert page.is_file()
+    body = page.read_text()
+    assert "The capital of France is Paris." in body
+    # Frontmatter retained the question for backref.
+    assert "What is the capital of France" in body
+    # Index has the row.
+    assert "[France-capital](topics/France-capital.md)" in paths.index.read_text()
+
+
+def test_file_command_no_assistant_yet(tmp_path, monkeypatch, capsys):
+    from src import wiki
+    from src.repl import _cmd_file
+    monkeypatch.setenv("HERMES_WIKI_PATH", str(tmp_path / "wiki"))
+    wiki.init_wiki()
+    sess = ChatSession()  # no last_assistant
+    _cmd_file(sess, "anything")
+    out = capsys.readouterr().out
+    assert "no answer" in out.lower()
+
+
+def test_file_command_refuses_overwrite_without_force(tmp_path, monkeypatch, capsys):
+    from src import wiki
+    from src.repl import _cmd_file
+    monkeypatch.setenv("HERMES_WIKI_PATH", str(tmp_path / "wiki"))
+    wiki.init_wiki()
+    sess = ChatSession()
+    sess.last_user = "q"
+    sess.last_assistant = "first answer"
+    _cmd_file(sess, "topic")
+    sess.last_assistant = "second answer"
+    _cmd_file(sess, "topic")
+    err = capsys.readouterr().err
+    assert "already exists" in err
+    page = wiki.get_paths().topics_dir / "topic.md"
+    assert "first answer" in page.read_text()
+
+
+def test_file_command_refuses_handwritten_with_force(tmp_path, monkeypatch, capsys):
+    """The hand-written guard must apply REGARDLESS of --force."""
+    from src import wiki
+    from src.repl import _cmd_file
+    monkeypatch.setenv("HERMES_WIKI_PATH", str(tmp_path / "wiki"))
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    handwritten = paths.topics_dir / "topic.md"
+    handwritten.write_text("# Hand-written\nNo frontmatter.\n")
+
+    sess = ChatSession()
+    sess.last_user = "q"
+    sess.last_assistant = "answer"
+    _cmd_file(sess, "topic --force")
+    err = capsys.readouterr().err
+    assert "hand-written" in err
+    # User's file untouched.
+    assert handwritten.read_text() == "# Hand-written\nNo frontmatter.\n"
+
+
+def test_file_command_unknown_flag_rejected(tmp_path, monkeypatch, capsys):
+    """`/file foo --verbose` must error, not slip --verbose into the name."""
+    from src import wiki
+    from src.repl import _cmd_file
+    monkeypatch.setenv("HERMES_WIKI_PATH", str(tmp_path / "wiki"))
+    wiki.init_wiki()
+    sess = ChatSession()
+    sess.last_user = "q"
+    sess.last_assistant = "a"
+    _cmd_file(sess, "foo --verbose")
+    out = capsys.readouterr().out
+    assert "unknown flag" in out
+
+
+def test_last_user_only_advances_after_successful_assistant_turn():
+    """A cancelled user turn must not poison the (last_user, last_assistant)
+    pair that /file relies on."""
+    sess = ChatSession()
+    # Successful turn.
+    sess.add_user("Q1: what is 2+2?")
+    sess.add_assistant("4")
+    assert sess.last_user == "Q1: what is 2+2?"
+    assert sess.last_assistant == "4"
+    # Q2 lands but the assistant turn is empty (cancelled before any token).
+    sess.add_user("Q2: cancelled")
+    sess.add_assistant("")  # gated out by add_assistant's empty-check
+    # last_* MUST still point at the (Q1, A1) pair.
+    assert sess.last_user == "Q1: what is 2+2?"
+    assert sess.last_assistant == "4"
+
+
+def test_file_command_force_overwrites(tmp_path, monkeypatch):
+    from src import wiki
+    from src.repl import _cmd_file
+    monkeypatch.setenv("HERMES_WIKI_PATH", str(tmp_path / "wiki"))
+    wiki.init_wiki()
+    sess = ChatSession()
+    sess.last_user = "q"
+    sess.last_assistant = "first answer"
+    _cmd_file(sess, "topic")
+    sess.last_assistant = "second answer"
+    _cmd_file(sess, "topic --force")
+    page = wiki.get_paths().topics_dir / "topic.md"
+    assert "second answer" in page.read_text()
+
+
 def test_format_context_takes_all_when_budget_large():
     hits = [
         {"source_path": "/v/a.md", "chunk_idx": 0, "text": "alpha"},

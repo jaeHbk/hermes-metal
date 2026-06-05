@@ -36,6 +36,15 @@ if len(sys.argv) >= 2 and sys.argv[1] == "notify":
         print("\nhermes notify: interrupted.", file=sys.stderr)
         sys.exit(130)
 
+# `hermes wiki` and `hermes lint` are stdlib-only (no LanceDB / no chat
+# server). Early-route so a broken venv doesn't break the wiki bootstrap.
+if len(sys.argv) >= 2 and sys.argv[1] == "wiki":
+    from src import wiki_cmd as _wiki_cmd
+    sys.exit(_wiki_cmd.run(sys.argv[2:]))
+if len(sys.argv) >= 2 and sys.argv[1] == "lint":
+    from src import lint_cmd as _lint_cmd
+    sys.exit(_lint_cmd.run(sys.argv[2:]))
+
 
 import asyncio
 import json
@@ -305,6 +314,32 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,  # actual help comes from notify's own parser
     )
 
+    # Help-only stubs: real flags live in src/wiki_cmd.py and src/lint_cmd.py
+    # to avoid drift from a duplicate definition.
+    sub.add_parser(
+        "wiki",
+        help="Initialize / inspect the wiki layer. (See `hermes wiki --help`.)",
+        add_help=False,
+    )
+    sub.add_parser(
+        "lint",
+        help="Wiki health-check: orphans, stubs, stale, unused sources.",
+        add_help=False,
+    )
+
+    ingest = sub.add_parser(
+        "ingest",
+        help="Summarize a raw source into a wiki page (writes wiki/sources/<stem>.md).",
+    )
+    ingest.add_argument("path", help="Path to the source file.")
+    ingest.add_argument("--force", action="store_true",
+                        help="Overwrite an existing wiki page.")
+    ingest.add_argument("--name", default=None,
+                        help="Override the wiki page name.")
+    ingest.add_argument("--max-tokens", type=int, default=1024,
+                        help="Cap on chat server response.")
+    ingest.set_defaults(func=_cmd_ingest)
+
     index = sub.add_parser(
         "index",
         help="Backfill / GC the vault index (one-shot, complementary to the live watcher).",
@@ -332,6 +367,17 @@ def _run_doctor_late() -> int:
     from src import doctor as _doctor
     argv = sys.argv[2:] if len(sys.argv) > 2 else []
     return _doctor.run(argv)
+
+
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    from src import ingest_cmd
+    flags: list[str] = [args.path]
+    if args.force:
+        flags.append("--force")
+    if args.name:
+        flags.extend(["--name", args.name])
+    flags.extend(["--max-tokens", str(args.max_tokens)])
+    return ingest_cmd.run(flags)
 
 
 def _cmd_index(args: argparse.Namespace) -> int:

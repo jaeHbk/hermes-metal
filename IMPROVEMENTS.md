@@ -8,6 +8,113 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-04 — Wiki layer (architectural pivot from retrieval-only to compounding synthesis)
+
+**Problem:** Every query rediscovered knowledge from raw notes from
+scratch. Nothing accumulated. A subtle question that synthesized five
+notes made the model find and piece together fragments every time,
+with no memory that this synthesis ever happened. The
+[LLM-Wiki pattern](https://gist.github.com/...) describes exactly the
+gap: persistent, LLM-maintained knowledge that compounds rather than
+being re-derived.
+
+**Change:** Three layers, all additive. Existing surfaces still work.
+
+* **`src/wiki.py`** — stdlib-only wiki primitives. `WikiPaths` resolution
+  (env → `<vault>/wiki/`), atomic page writes via temp+rename,
+  log/index update, `[[wiki-link]]` and `[md](link)` parsing,
+  `is_managed` frontmatter detection (bounded to the YAML block, not
+  body substring matches).
+* **`hermes wiki init / status`** — bootstrap a wiki at
+  `<vault>/wiki/` with `sources/`, `topics/`, `digests/` subdirs plus
+  three meta files (`index.md`, `log.md`, `.hermes-agents.md`). Idempotent.
+* **`hermes ingest <path>`** — drives the chat server with a structured
+  ingest prompt (Summary / Key claims / Entities and concepts / Open
+  questions), writes `wiki/sources/<stem>.md`, updates index, appends
+  log. Refuses to overwrite hand-written files even with `--force`.
+  Three-step write (page → index → log) with rollback: if index/log
+  fails, the page is unlinked so the wiki stays internally consistent.
+* **`hermes lint`** — read-only wiki health-check. Reports orphan
+  topics (no inbound link), unused sources (in `sources/` but never
+  cited), stubs (referenced pages with no file), stale (older than
+  `--stale-days`). Self-loop-safe (a page linking to its own stem
+  doesn't mask its own orphan status). Digests are exempt — they're
+  chronologically terminal. `--strict` exits 1 on any issue.
+* **REPL `/file <name>` and `/wiki`** — `/file` promotes the last
+  assistant turn into `wiki/topics/<name>.md` with the question
+  retained as a frontmatter backref. The (last_user, last_assistant)
+  pair is captured atomically in `add_assistant`, so a cancelled
+  follow-up question can't poison the next `/file`. Hand-written
+  guard applies regardless of `--force`. `/wiki` shows quick status.
+* **System prompt becomes wiki-aware** — built once per session as
+  base prompt + today's date + `.hermes-agents.md` contents (if
+  initialized). Stable across the session so KV-slot prefix matching
+  still works.
+* **Doctor** gains a Wiki section (SKIP when uninitialized — the wiki
+  is opt-in).
+
+The watcher auto-indexes wiki pages because they live under
+`<vault>/`. No schema change, no reindex needed. Knowledge written
+into the wiki is queryable on the very next turn.
+
+Adversarial review (4 parallel subagents) caught **12 real bugs**, all
+fixed:
+
+1. `_join_index` silently dropped rows for sections the user had
+   deleted from `index.md`. Now appends missing sections at the end.
+2. `is_managed` substring match wasn't bounded to the frontmatter
+   block — a user file with `hermes-managed: true` quoted in its body
+   was mis-flagged and would be overwritten. Now scoped to the YAML
+   block between the opening and closing `---`.
+3. Ingest hand-written guard was nested inside `not args.force`, so
+   `--force` could overwrite hand-written user files. Hoisted out.
+4. `_slugify` collision check was case-sensitive. APFS (the project's
+   sole target FS) is case-insensitive by default — `INDEX.md` and
+   `index.md` are the same path, so the guard must compare in lower
+   case.
+5. Ingest's three-step write had no rollback; a failure between the
+   page write and the index update left the page on disk with no log
+   entry, blocking re-runs because the early-exit saw the file
+   already existing. Now wraps index+log in try/except and unlinks
+   the page on failure.
+6. Lint self-loop bug: a page containing `[[its-own-stem]]` inflated
+   its own inbound count to 1, masking it from orphan detection.
+   `_index_outbound_links` now discards self-references.
+7. `_read_updated` only tried three exact strptime formats; ISO
+   timestamps with fractional seconds (`2026-06-04T19:00:00.123Z`)
+   silently failed → page never flagged as stale even when ancient.
+   Now uses `datetime.fromisoformat` first.
+8. Lint stem-collision: `page_stems = {stem: path}` silently
+   overwrote one of two same-stem pages in different subdirs. Now
+   iterates on full paths and counts inbounds via a stem-keyed
+   helper.
+9. `/file --force` had the same hand-written-overwrite bug as ingest.
+   Same fix.
+10. `/file` arg parser only checked the trailing token for `--force`,
+    so `/file foo --force --verbose` silently stuffed `--verbose` into
+    the slug. Now parses each token; any unknown flag errors out.
+11. `last_user` was set in `add_user` BEFORE the assistant streamed.
+    A cancelled Q2 corrupted the `(Q, A)` pair `/file` reads — Q2
+    backref on A1. Now both `last_user` and `last_assistant` update
+    atomically in `add_assistant`, only on a successful turn.
+12. (Filed during refactor: lint orphan-check originally treated
+    digests as orphans — corrected to exempt them as chronologically
+    terminal.)
+
+**Files:** `src/wiki.py`, `src/wiki_cmd.py`, `src/ingest_cmd.py`,
+`src/lint_cmd.py`, `src/repl.py` (extends), `src/doctor.py` (extends),
+`src/cli.py` (subcommand wiring), `tests/test_wiki.py`,
+`tests/test_ingest.py`, `tests/test_lint_cmd.py`,
+`tests/test_repl_logic.py` (extends).
+
+**Impact:** This is the architectural pivot the project was missing.
+Without it hermes was a (good) chatbot over notes. With it, hermes
+becomes the compounding knowledge base the original CLAUDE.md
+described as the goal. The user keeps owning their vault notes; the
+LLM owns the wiki. Tests: 84 → 141 passing.
+
+---
+
 ## 2026-06-04 — Telegram notification transport (Phase A of daily-summary cascade)
 
 **Problem:** No way for the agent to push anything off the local machine.
@@ -90,12 +197,13 @@ remaining phases follow in order because each enables the next.
 
 **Sketch (multi-phase):**
 
-- **Phase B — temporal awareness.** Inject `Today is YYYY-MM-DD
-  (Weekday)` into REPL/ask system prompt. Cheap query-time parser
-  (`yesterday`, `last week`, explicit dates) adds a `where source_path
-  LIKE '%YYYY-MM-DD%'` filter. Configurable daily-note glob in
-  `config/vault.yaml` since users use different schemes. Enables
-  Phase D's "yesterday's activity" section to actually find yesterday.
+- **Phase B — temporal awareness.** Subsumed by the wiki schema:
+  `.hermes-agents.md` declares "daily notes live at `journal/YYYY-MM-DD.md`"
+  and the LLM reads it at session start. The system prompt also injects
+  `Today is YYYY-MM-DD (Weekday)`. A cheap query-time parser
+  (`yesterday`, `last week`, explicit dates) still adds a `where
+  source_path LIKE '%YYYY-MM-DD%'` filter. Enables Phase D's
+  "yesterday's activity" section to actually find yesterday.
 
 - **Phase C — metadata-rich schema (the migration).** Add `mtime`,
   `heading_trail`, `tags` columns to LanceDB. Switch vector metric to
@@ -106,23 +214,27 @@ remaining phases follow in order because each enables the next.
   schema-version check; `hermes index --migrate` runs the
   `--backfill --force` for users on the old schema.
 
-- **Phase D — `hermes summary` + scheduled delivery.** New
-  `src/summary.py` and `hermes summary [--date YYYY-MM-DD] [--dry-run]
+- **Phase D — `hermes digest` + scheduled delivery.** New
+  `src/digest.py` and `hermes digest [--date YYYY-MM-DD] [--dry-run]
   [--no-push]`. Walks vault for files with `mtime` in window. Builds
   sections: yesterday's activity, learnings (conceptual extracts),
   practice questions (gated on class-tag/path detection), open
-  questions (TODOs and `?` lines surfaced from yesterday). Sends a
-  short headline via `notify.send` + full markdown via
-  `notify.send_document`. New `com.hermes.metal.summarizer.plist`
+  questions (TODOs and `?` lines surfaced from yesterday). **Writes a
+  durable wiki page at `wiki/digests/YYYY-MM-DD.md`** (so digests
+  compound over time, browseable in Obsidian's graph view) AND sends a
+  short headline via `notify.send` + the full markdown via
+  `notify.send_document`. New `com.hermes.metal.digest.plist`
   LaunchAgent with `StartCalendarInterval`; `make
-  install-summarizer-daemon` target. Idempotency state at
-  `storage/summarizer/last_sent.json` (manual `hermes summary` after
-  cron fired won't double-send unless `--force`).
+  install-digest-daemon` target. Idempotency state from the wiki page
+  itself (page exists for date → don't double-send unless `--force`).
 
-- **Phase E — cross-session conversation memory (optional).** New
-  `conversations` LanceDB table keyed off Phase C's metadata schema.
-  REPL appends each (user, assistant) pair on exit. Phase D's summary
-  then includes "yesterday's REPL chats" alongside vault changes.
+- **Phase E — cross-session conversation memory.** Made trivial by the
+  wiki layer: REPL conversations marked with `/file <topic>` already
+  become wiki pages. For unmarked conversations, optionally append the
+  full transcript to `wiki/log.md` on REPL exit (gated on minimum
+  length). Phase D's digest can then cite REPL chats the same way it
+  cites notes. No separate LanceDB table needed — the wiki IS the
+  conversation memory.
 
 **Risk:**
 - Phase B misparses produce overconfident wrong answers; cap to high-

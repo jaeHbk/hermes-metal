@@ -61,7 +61,7 @@ from src.server.client import HermesClient, HermesError
 # ---------------------------------------------------------------- constants
 
 
-SYSTEM_PROMPT = (
+_BASE_SYSTEM_PROMPT = (
     "You are hermes-metal, the user's local 'second brain'. Answer using ONLY "
     "the provided notes when they are relevant; if the notes do not contain "
     "the answer, say so plainly and answer from general knowledge while "
@@ -70,6 +70,39 @@ SYSTEM_PROMPT = (
     "conversation may span multiple turns; refer back to earlier turns when "
     "useful, but trust the freshly-retrieved notes over your memory of them."
 )
+
+
+def _build_system_prompt() -> str:
+    """Compose the live system prompt: base + today's date + wiki schema.
+
+    Reading the wiki schema is best-effort — if the wiki isn't
+    initialized or the file has been deleted, we just skip that block.
+    Date is always included because temporal awareness is cheap and
+    the model otherwise has no idea when "today" is.
+    """
+    from datetime import datetime
+    parts = [_BASE_SYSTEM_PROMPT]
+    today = datetime.now().astimezone()
+    parts.append(f"\nToday is {today.strftime('%Y-%m-%d (%A)')}.")
+    try:
+        from src import wiki as _wiki
+        paths = _wiki.get_paths()
+        if paths.schema.is_file():
+            schema_text = paths.schema.read_text(encoding="utf-8", errors="replace").strip()
+            if schema_text:
+                parts.append(
+                    "\nThe user has provided this guide to their vault structure "
+                    "(read it, follow it):\n\n"
+                    + schema_text
+                )
+    except Exception:  # noqa: BLE001 — best-effort; never let prompt build fail
+        pass
+    return "\n".join(parts)
+
+
+# Kept for backwards compat with tests / external callers; computed once
+# per session by `_async_run` via _build_system_prompt().
+SYSTEM_PROMPT = _BASE_SYSTEM_PROMPT
 
 DEFAULT_K = 5
 DEFAULT_MAX_TOKENS = 512
@@ -112,10 +145,11 @@ def _kv_slot_name() -> str:
 
 BANNER = """\
 hermes-metal REPL — local second-brain chat.
-  /help              show commands     /clear         reset conversation
-  /sources           show last hits    /save P        save transcript to P
-  /load P            load transcript   /forget-cache  drop persisted KV slot
-  /norag             disable RAG       /rag           re-enable RAG
+  /help              show commands       /clear         reset conversation
+  /sources           show last hits      /save P        save transcript
+  /load P            load transcript     /file NAME     file last answer in wiki
+  /wiki              wiki status         /forget-cache  drop persisted KV slot
+  /norag             disable RAG         /rag           re-enable RAG
   Ctrl-C             cancel generation / exit at empty prompt
   Ctrl-D             exit
 """
@@ -135,24 +169,40 @@ class ChatSession:
 
     history: list[dict[str, str]] = field(default_factory=list)
     last_hits: list[dict[str, Any]] = field(default_factory=list)
+    last_assistant: str = ""              # for /file <name>
+    last_user: str = ""                   # for /file <name>'s "filed from" backref
     rag_enabled: bool = True
     k: int = DEFAULT_K
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = DEFAULT_TEMPERATURE
-    context_window: int = 8192  # default; refined from host_topology.env
+    context_window: int = 8192            # default; refined from host_topology.env
+    system_prompt: str = SYSTEM_PROMPT    # live prompt; overwritten in _async_run
 
     def add_user(self, content: str) -> None:
         self.history.append({"role": "user", "content": content})
+        # NOTE: ``last_user`` is intentionally NOT updated here. It pairs
+        # with ``last_assistant``, which only gets set on a successful
+        # assistant turn. If we updated ``last_user`` here, a cancelled
+        # follow-up question would corrupt the (Q, A) pair that ``/file``
+        # reads — filing answer A1 with backref to question Q2.
 
     def add_assistant(self, content: str) -> None:
         # Skip empty assistant entries (e.g. user cancelled mid-stream before
         # any token arrived) so we don't pollute history with blank turns.
         if content.strip():
             self.history.append({"role": "assistant", "content": content})
+            self.last_assistant = content
+            # Now that the assistant turn is durable, snapshot the user
+            # message it answered. history[-2] is the corresponding
+            # ``user`` entry (we just appended assistant at -1).
+            if len(self.history) >= 2 and self.history[-2]["role"] == "user":
+                self.last_user = self.history[-2]["content"]
 
     def reset(self) -> None:
         self.history.clear()
         self.last_hits.clear()
+        self.last_assistant = ""
+        self.last_user = ""
 
 
 # ---------------------------------------------------------------- helpers
@@ -450,7 +500,7 @@ async def _do_turn(
     if sent_history and sent_history[-1]["role"] == "user":
         sent_history = sent_history[:-1] + [{"role": "user", "content": decorated}]
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages: list[dict[str, Any]] = [{"role": "system", "content": session.system_prompt}]
     messages.extend(sent_history)
 
     text = ""
@@ -585,6 +635,104 @@ def _parse_transcript(text: str) -> list[dict[str, str]]:
     return out
 
 
+def _cmd_file(session: ChatSession, arg: str) -> None:
+    """`/file <name>` — promote the last assistant turn into a wiki topic page.
+
+    The point of this command (per the LLM-Wiki article): explorations
+    should compound back into the knowledge base, not vanish into chat
+    history. We write to ``wiki/topics/<name>.md`` with the answer as
+    the body and the user's question retained in the frontmatter as a
+    backref.
+
+    Refuses to overwrite an existing page without ``--force``-style
+    explicit replacement; users can `/file <name> --force` to override
+    (we accept "--force" as a trailing token in arg).
+    """
+    if not arg:
+        print("usage: /file <name> [--force]")
+        return
+    if not session.last_assistant.strip():
+        print("(no answer to file yet — ask something first)")
+        return
+
+    # Recognize `--force` anywhere in the args (not just trailing) so
+    # `/file foo --force` and `/file --force foo` both work, and an
+    # unknown flag like `--verbose` doesn't silently slip into the name.
+    raw_parts = arg.split()
+    force = False
+    name_parts: list[str] = []
+    for part in raw_parts:
+        if part == "--force":
+            force = True
+        elif part.startswith("--"):
+            print(f"unknown flag: {part}  (try /file <name> [--force])")
+            return
+        else:
+            name_parts.append(part)
+    name = " ".join(name_parts).strip()
+    if not name:
+        print("usage: /file <name> [--force]")
+        return
+
+    try:
+        from src import wiki as _wiki
+        from src.ingest_cmd import _slugify
+    except ImportError as exc:
+        print(f"hermes: wiki module unavailable: {exc}", file=sys.stderr)
+        return
+
+    paths = _wiki.get_paths()
+    if not _wiki.is_initialized(paths):
+        print(f"hermes: wiki not initialized at {paths.root}.", file=sys.stderr)
+        print(f"        run: hermes wiki init", file=sys.stderr)
+        return
+
+    stem = _slugify(name)
+    page_path = paths.topics_dir / f"{stem}.md"
+    # Hand-written guard MUST run regardless of --force: we never clobber
+    # a file the LLM didn't author. If the user really wants to replace
+    # one, they delete it manually.
+    if page_path.exists() and not _wiki.is_managed(page_path):
+        print(f"hermes: refusing to overwrite hand-written {page_path}", file=sys.stderr)
+        return
+    if page_path.exists() and not force:
+        print(f"hermes: {page_path.name} already exists "
+              f"(/file {name} --force to overwrite).", file=sys.stderr)
+        return
+
+    page = _wiki.Page(
+        title=stem,
+        body=session.last_assistant.strip(),
+        frontmatter={
+            "filed-from": "repl",
+            "question": session.last_user.strip().replace("\n", " ")[:200] if session.last_user else "",
+        },
+    )
+    _wiki.write_page(page_path, page)
+    summary = session.last_user.strip().replace("\n", " ")[:120] if session.last_user else "filed from REPL"
+    _wiki.update_index_row(paths, "Topics", stem, summary)
+    _wiki.append_log(paths, "file", stem, detail=f"From REPL question: {session.last_user[:200]!r}")
+    print(f"(filed → {page_path.relative_to(paths.root.parent)})")
+
+
+def _cmd_wiki(_session: ChatSession) -> None:
+    """`/wiki` — quick wiki status without leaving the REPL."""
+    try:
+        from src import wiki as _wiki
+    except ImportError as exc:
+        print(f"hermes: wiki module unavailable: {exc}", file=sys.stderr)
+        return
+    paths = _wiki.get_paths()
+    if not _wiki.is_initialized(paths):
+        print(f"(wiki not initialized at {paths.root}; run: hermes wiki init)")
+        return
+    sources = list(paths.sources_dir.glob("*.md")) if paths.sources_dir.is_dir() else []
+    topics = list(paths.topics_dir.glob("*.md")) if paths.topics_dir.is_dir() else []
+    digests = list(paths.digests_dir.glob("*.md")) if paths.digests_dir.is_dir() else []
+    print(f"wiki: {paths.root}")
+    print(f"  sources={len(sources)}  topics={len(topics)}  digests={len(digests)}")
+
+
 def _cmd_load(session: ChatSession, arg: str) -> None:
     if not arg:
         print("usage: /load <path>")
@@ -623,6 +771,10 @@ def _handle_slash(line: str, session: ChatSession) -> str:
         _cmd_save(session, arg)
     elif cmd == "load":
         _cmd_load(session, arg)
+    elif cmd == "file":
+        _cmd_file(session, arg)
+    elif cmd == "wiki":
+        _cmd_wiki(session)
     elif cmd == "norag":
         session.rag_enabled = False
         print("(RAG disabled — chat with the model only)")
@@ -685,6 +837,12 @@ def _save_readline_history() -> None:
 async def _async_run(session: ChatSession) -> int:
     """Main async loop. One HermesClient for the whole session keeps the
     httpx connection pool warm across turns."""
+    # Compose the live system prompt once at session start: base + today's
+    # date + the user's wiki schema (if initialized). Cached on the
+    # session so every turn sees the same prompt — keeps KV-slot prefix
+    # matching stable.
+    session.system_prompt = _build_system_prompt()
+
     db_path = _resolve_db_path()
     embed_url = _resolve_embed_url()
 

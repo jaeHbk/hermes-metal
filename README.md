@@ -5,6 +5,12 @@ vault, embeds it locally with `nomic-embed-text-v1.5`, indexes it in LanceDB,
 and serves Hermes-3-8B (Q4_K_M, GGUF) over a local OpenAI-compatible chat API
 via `llama.cpp` + Metal — all under macOS QoS so foreground apps stay snappy.
 
+Beyond plain RAG: hermes maintains an **LLM-authored wiki** sitting between
+your raw notes and queries. Sources you ingest produce summary pages;
+explorations you `/file` from the REPL produce topic pages; the watcher
+indexes the whole thing automatically so future queries draw on accumulated
+synthesis rather than rediscovering knowledge every turn.
+
 ## Requirements
 
 - Apple Silicon (M1/M2/M3/M4), macOS 13+
@@ -119,6 +125,9 @@ If all five pass, you're ready to test Phase A (Telegram notifications).
 | `hermes status`        | Probe both `/health` endpoints and the index size.         |
 | `hermes doctor`        | End-to-end self-diagnostic with one-line `fix:` hints.     |
 | `hermes index`         | Backfill / GC the vault index (one-shot; see below).       |
+| `hermes wiki init`     | Bootstrap the LLM-authored wiki under `<vault>/wiki/`.     |
+| `hermes ingest <path>` | Summarize a raw source into `wiki/sources/<stem>.md`.      |
+| `hermes lint`          | Wiki health-check: orphans, stubs, stale, unused sources.  |
 | `hermes notify`        | Send a Telegram message; `--setup` configures, `--check` validates. |
 | `hermes repl`          | Same as bare `hermes`, with `-k`, `--max-tokens`, `--no-rag`. |
 
@@ -155,6 +164,9 @@ For one-shot scripted use, `hermes ask "<question>"` still works.
 
 REPL slash commands worth knowing:
 
+- `/file <name>` — promote the last assistant turn into
+  `wiki/topics/<name>.md` (the wiki auto-indexes for retrieval).
+- `/wiki` — quick wiki status (page counts, last update).
 - `/save <path>` / `/load <path>` — round-trippable transcripts (markdown).
 - `/sources` — show retrievals from the last turn.
 - `/clear` — wipe conversation; retrieval still works on the next turn.
@@ -162,6 +174,88 @@ REPL slash commands worth knowing:
 - `/forget-cache` — drop the persisted KV cache (the REPL silently
   saves it to slot 0 on exit and restores on next start; see
   `storage/slots/`).
+
+## Building your wiki
+
+The wiki is a structured, LLM-maintained subtree at `<vault>/wiki/`. You
+keep owning your raw notes; the LLM owns the wiki. The watcher
+automatically indexes wiki pages because they live under your vault, so
+synthesis becomes part of retrieval the moment it's written.
+
+```
+<vault>/
+├── (your raw notes — the LLM never edits these)
+└── wiki/
+    ├── .hermes-agents.md     ← schema; you edit it, the LLM reads it
+    ├── index.md              ← content-oriented catalog (LLM-maintained)
+    ├── log.md                ← chronological audit (append-only)
+    ├── sources/              ← one summary per ingested raw source
+    ├── topics/               ← concept/entity pages built up over time
+    └── digests/              ← scheduled daily summaries (Phase D, soon)
+```
+
+### Bootstrap
+
+```sh
+hermes wiki init        # creates the structure (idempotent)
+hermes wiki status      # page counts and last operation
+```
+
+Edit `<vault>/wiki/.hermes-agents.md` to describe your conventions —
+where daily notes live, how class material is tagged, citation
+preferences. The LLM reads this at REPL/ask startup and threads it into
+the system prompt.
+
+### Ingest a raw source
+
+```sh
+hermes ingest path/to/article.md
+```
+
+Reads the source, drives the chat server with a structured-output
+prompt (Summary / Key claims / Entities / Open questions), and writes
+`wiki/sources/<stem>.md`. Refuses to overwrite hand-written files even
+with `--force`. Repeated ingest of the same source is a no-op without
+`--force`. Updates `wiki/index.md` and `wiki/log.md` atomically — if
+the index update fails, the page is rolled back so the wiki stays
+internally consistent.
+
+### File a REPL answer as a topic page
+
+In the REPL, after asking a question and getting an answer worth
+keeping:
+
+```
+hermes>  what's the difference between Q4_K_M and Q4_0 quantization?
+... (model answers) ...
+hermes>  /file quant-comparison
+(filed → wiki/topics/quant-comparison.md)
+```
+
+Now the next query about "quantization" pulls in this synthesis,
+not just the raw notes.
+
+### Lint the wiki
+
+```sh
+hermes lint                 # orphans, stubs, stale, unused sources
+hermes lint --strict        # exit 1 on any issue (CI-friendly)
+hermes lint --stale-days 60 # adjust the stale threshold
+```
+
+Read-only — output is a report. The user decides what to act on.
+
+### Why this matters
+
+Without the wiki, every query rediscovers knowledge from raw notes.
+With it, your explorations and the LLM's syntheses compound. A subtle
+question that synthesizes five sources is answered once, filed as a
+topic page, and the next time something nearby is asked, the
+synthesis is right there to draw from.
+
+The pattern is described in detail in
+[the LLM Wiki article](https://gist.github.com/) (the gist that
+inspired this layer).
 
 ## Notifications (Telegram) — Phase A test guide
 

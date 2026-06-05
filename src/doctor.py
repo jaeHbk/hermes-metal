@@ -641,6 +641,55 @@ def _summary_line(sections: list[Section]) -> tuple[str, str]:
 # --------------------------------------------------------------------- run
 
 
+def check_wiki() -> Section:
+    """Report wiki layer state.
+
+    SKIP when the wiki hasn't been initialized — it's opt-in. OK with
+    page counts when present. WARN if log.md exists but index.md is
+    missing (a partially-initialized wiki suggests a crashed init).
+    """
+    s = Section("Wiki")
+    try:
+        from src import wiki
+    except (ImportError, SyntaxError) as exc:
+        s.add(Result("wiki module", FAIL, f"src.wiki failed to import: {exc}",
+                     fix="check src/wiki.py — likely a syntax / import error."))
+        return s
+
+    paths = wiki.get_paths()
+    if not paths.root.exists():
+        s.add(Result(
+            "wiki", SKIP,
+            f"not initialized ({paths.root} does not exist)",
+            fix="hermes wiki init   # opt-in; required only if you want the wiki layer.",
+        ))
+        return s
+
+    # Partial init detection: if either index OR schema is missing while
+    # the directory exists, something went wrong. Surface as WARN.
+    if not paths.index.is_file() or not paths.schema.is_file():
+        missing = [name for name, p in [
+            ("index.md", paths.index),
+            (".hermes-agents.md", paths.schema),
+        ] if not p.is_file()]
+        s.add(Result(
+            "wiki", WARN,
+            f"directory exists but missing: {', '.join(missing)}",
+            fix="hermes wiki init   # idempotent; will only create what's missing.",
+        ))
+        return s
+
+    sources = list(paths.sources_dir.glob("*.md")) if paths.sources_dir.is_dir() else []
+    topics = list(paths.topics_dir.glob("*.md")) if paths.topics_dir.is_dir() else []
+    digests = list(paths.digests_dir.glob("*.md")) if paths.digests_dir.is_dir() else []
+    s.add(Result(
+        "wiki",
+        OK,
+        f"{paths.root.name}/  sources={len(sources)} topics={len(topics)} digests={len(digests)}",
+    ))
+    return s
+
+
 def check_notifications() -> Section:
     """Validate the Telegram bot config, if any.
 
@@ -712,6 +761,7 @@ def run_all() -> list[Section]:
         check_agents(),
         check_servers(),
         check_index(),
+        check_wiki(),
         check_notifications(),
     ]
 
