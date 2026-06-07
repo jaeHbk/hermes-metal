@@ -13,6 +13,11 @@ Three modes (combinable):
   matches the vault filter. The watcher handles deletions while running,
   but files moved out of the vault while the daemon was stopped become
   orphans without this.
+* ``--migrate`` — bring an old (v1, retrieval-only) index up to the current
+  metadata-rich schema. The column add is in-place and instant; this command
+  then re-indexes only the rows whose metadata is still placeholder, so a
+  large vault isn't fully re-embedded. Equivalent to a targeted
+  ``--backfill --force`` over just the stale sources.
 
 The watcher catches future writes; this command catches the past. Running
 both in sequence on a fresh install is the supported way to onboard an
@@ -181,19 +186,43 @@ def run(argv: list[str] | None = None) -> int:
                    help="With --backfill: re-embed every file regardless of state.")
     p.add_argument("--gc", action="store_true",
                    help="Remove index rows whose source file is gone or now excluded.")
+    p.add_argument("--migrate", action="store_true",
+                   help="Upgrade an old index to the metadata-rich schema and "
+                        "re-index only the rows whose metadata is still placeholder.")
+    p.add_argument("--gc-chats", action="store_true",
+                   help="Prune archived REPL conversations (wiki/conversations/) "
+                        "older than --older-than days.")
+    p.add_argument("--older-than", type=int, default=90, metavar="DAYS",
+                   help="With --gc-chats: age threshold in days (default 90).")
     p.add_argument("--dry-run", action="store_true",
-                   help="With --gc: show what would be removed without removing.")
+                   help="With --gc / --gc-chats: show what would be removed without removing.")
     p.add_argument("--limit", type=int, default=None,
                    help="Process at most N files (smoke-test backfill on huge vaults).")
     args = p.parse_args(argv)
 
-    if not (args.backfill or args.gc):
-        p.error("specify --backfill, --gc, or both.")
-    if args.dry_run and not args.gc:
-        # --dry-run only makes sense for the destructive op (GC). Refuse
-        # rather than silently performing a real backfill, which would
-        # confuse anyone using "dry run" as a safety check.
-        p.error("--dry-run requires --gc. Backfill is always real (it's idempotent on top of itself).")
+    if not (args.backfill or args.gc or args.migrate or args.gc_chats):
+        p.error("specify --backfill, --gc, --migrate, --gc-chats, or a combination.")
+    if args.dry_run and not (args.gc or args.gc_chats):
+        # --dry-run only makes sense for a destructive op. Refuse rather than
+        # silently performing a real backfill, which would confuse anyone
+        # using "dry run" as a safety check.
+        p.error("--dry-run requires --gc or --gc-chats. Backfill is always real (it's idempotent).")
+
+    # --gc-chats operates on the wiki, not the vector index, so it can run
+    # before the vault/db resolution and short-circuit if it's the only op.
+    if args.gc_chats:
+        from src import wiki, conversation
+        wpaths = wiki.get_paths()
+        removed = conversation.gc_conversations(
+            wpaths, older_than_days=args.older_than, dry_run=args.dry_run
+        )
+        verb = "would remove" if args.dry_run else "removed"
+        for f in removed:
+            print(f"  {verb}: {f.name}", file=sys.stderr)
+        print(f"hermes index --gc-chats: {verb} {len(removed)} conversation(s) "
+              f"older than {args.older_than}d", file=sys.stderr)
+        if not (args.backfill or args.gc or args.migrate):
+            return 0
 
     vault_path = _resolve_vault_path()
     if vault_path is None:
@@ -216,6 +245,35 @@ def run(argv: list[str] | None = None) -> int:
     vault = LanceVault(path=db_path)
     started = time.monotonic()
 
+    # --migrate runs first: add the metadata columns (LanceVault does this on
+    # open via auto_migrate, but we report it explicitly), then re-index just
+    # the sources whose metadata is still placeholder so the vector data is
+    # repopulated with mtime/tags/heading_trail. On an already-current index
+    # this is a no-op beyond the schema check.
+    migrated = 0
+    if args.migrate:
+        added = vault.migrate()
+        if added:
+            print(f"  schema: added columns {', '.join(added)} (v1 -> v{vault.schema_version()})",
+                  file=sys.stderr)
+        else:
+            print(f"  schema: already at v{vault.schema_version()} (no columns added)",
+                  file=sys.stderr)
+        stale = set(vault.sources_with_stale_metadata())
+        if stale:
+            stale_files = [p for p in files if str(p.resolve()) in stale]
+            print(f"  migrate: re-indexing {len(stale_files)} source(s) with placeholder metadata",
+                  file=sys.stderr)
+            mi, _ms, me = _do_backfill(
+                vault, stale_files, embed_url=embed_url, force=True, limit=args.limit,
+            )
+            migrated, errored_migrate = mi, me
+        else:
+            print("  migrate: no rows need metadata repopulation", file=sys.stderr)
+            errored_migrate = 0
+    else:
+        errored_migrate = 0
+
     indexed = skipped = errored = 0
     if args.backfill:
         indexed, skipped, errored = _do_backfill(
@@ -232,12 +290,15 @@ def run(argv: list[str] | None = None) -> int:
 
     elapsed = time.monotonic() - started
     parts: list[str] = []
+    if args.migrate:
+        parts.append(f"migrated {migrated} source(s)")
     if args.backfill:
         parts.append(f"{indexed} indexed, {skipped} skipped, {errored} errored")
     if args.gc:
         verb = "would drop" if args.dry_run else "dropped"
         parts.append(f"{verb} {gc_dropped} orphan source(s)")
     print(f"done in {elapsed:.1f}s — " + "; ".join(parts), file=sys.stderr)
+    errored += errored_migrate
 
     # Exit non-zero if the user asked for backfill and got hard errors —
     # makes `make backfill && hermes ask ...` safe to chain.

@@ -1,22 +1,38 @@
 # hermes-metal
 
-A zero-lag, background "second brain" for Apple Silicon. Watches a Markdown
-vault, embeds it locally with `nomic-embed-text-v1.5`, indexes it in LanceDB,
-and serves Hermes-3-8B (Q4_K_M, GGUF) over a local OpenAI-compatible chat API
-via `llama.cpp` + Metal — all under macOS QoS so foreground apps stay snappy.
+A zero-lag, background "second brain" for Apple Silicon. It watches a Markdown
+vault, embeds it locally, serves an 8B model over a local OpenAI-compatible
+API, and answers questions about your notes — entirely on-device, under macOS
+QoS so foreground apps stay snappy.
 
-Beyond plain RAG: hermes maintains an **LLM-authored wiki** sitting between
-your raw notes and queries. Sources you ingest produce summary pages;
-explorations you `/file` from the REPL produce topic pages; the watcher
-indexes the whole thing automatically so future queries draw on accumulated
-synthesis rather than rediscovering knowledge every turn.
+Beyond plain retrieval, hermes maintains an **LLM-authored wiki** between your
+raw notes and your queries. Sources you ingest become summary pages;
+explorations you `/file` become topic pages; daily **digests** and archived
+**conversations** accumulate too. The watcher indexes all of it, so future
+queries draw on compounding synthesis instead of rediscovering everything each
+time.
+
+```
+write path (background, debounced):
+  Obsidian vault ─► watcher ─► nomic-embed (:8081) ─► LanceDB
+
+query path (per turn):
+  ask / repl ─► temporal scope ─► nomic-embed (:8081) ─► LanceDB top-N
+                                                            │
+                                              rerank ◄──────┘
+                                                │
+                                hermes-8b (:8080) ─► streamed answer
+```
+
+Three always-on LaunchAgents (`engine` = chat on `:8080`, `embed` on `:8081`,
+`watcher`) run under `ProcessType=Background` + `Nice=15`. An optional fourth
+(`digest`) fires once a day.
 
 ## Requirements
 
-- Apple Silicon (M1/M2/M3/M4), macOS 13+
-- Python 3.11 / 3.12
-- Xcode Command Line Tools
-- ~10 GB disk (model + build + index)
+- Apple Silicon (M1–M4), macOS 13+
+- Python 3.11+, Xcode Command Line Tools
+- ~10 GB disk (models + build + index)
 
 ## Quickstart
 
@@ -24,503 +40,218 @@ synthesis rather than rediscovering knowledge every turn.
 git clone --recursive https://github.com/jaeHbk/hermes-metal
 cd hermes-metal
 
-# 1. Tell hermes where your vault is. (No vault yet? `mkdir -p
-#    ~/Documents/Obsidian && echo "# hello" > ~/Documents/Obsidian/Welcome.md`)
-export HERMES_VAULT_PATH=~/Documents/Obsidian
+export HERMES_VAULT_PATH=~/Documents/Obsidian   # where your notes live
 
-# 2. Full install: arch check → build llama.cpp → venv → fetch models
-#    → install + boot 3 LaunchAgents (engine, embed, watcher).
-#    First run takes 5–15 min depending on network (models are ~5 GB).
-make all
+make all          # arch check → build llama.cpp → venv → fetch models →
+                  # install 3 LaunchAgents. First run: 5–15 min (models ~5 GB).
+make install-cli  # symlink `hermes` onto PATH (needs ~/.local/bin on PATH)
 
-# 3. Make `hermes` available in your shell. ~/.local/bin must be on PATH;
-#    override with PREFIX=/usr/local/bin if you prefer system-wide.
-make install-cli
-
-# 4. Confirm everything's healthy. Should print
-#    "hermes-metal: ready — N ok, 0 warn, 0 fail" and exit 0.
-hermes doctor
-
-# 5. (Existing vault only.) The watcher only catches future writes — for
-#    notes that already existed before install, run a one-shot backfill:
-hermes index --backfill
+hermes doctor                 # confirm everything's healthy
+hermes index --backfill       # index notes that existed before install
 ```
 
-Endpoints once running:
-- Chat: `http://127.0.0.1:8080/v1/chat/completions` (OpenAI-compatible)
-- Embeddings: `http://127.0.0.1:8081/v1/embeddings`
-
-Stop with `make stop-daemon`; remove agents with `make uninstall`.
-
-## First run — sanity test
-
-A 5-step verification you can do in 60 seconds end-to-end. Each step has
-a clear pass condition; if any one fails, `hermes doctor` is the next
-move.
-
-**1. Doctor is green.**
-
-```sh
-hermes doctor
-```
-
-Expect every section OK except possibly Notifications (SKIP if you
-haven't run `--setup` yet — that's fine, notifications are optional).
-Bottom line should say `hermes-metal: ready`.
-
-**2. Watcher catches a live write.**
-
-```sh
-echo "# Smoke test\n\nThe capital of France is Paris." \
-  > "$HERMES_VAULT_PATH/_smoke.md"
-sleep 8                       # debounce window is 5s
-hermes status | grep rows     # row count should be > 0
-```
-
-If `rows` is 0, the watcher didn't fire — check
-`logs/watcher.log` and rerun `hermes doctor`.
-
-**3. Retrieval finds it.**
-
-```sh
-hermes search "capital of France"
-```
-
-Should print `_smoke.md #chunk0` near the top.
-
-**4. End-to-end RAG answer.**
-
-```sh
-hermes ask "What's the capital of France according to my notes?"
-```
-
-Should stream an answer that cites `[_smoke.md]`.
-
-**5. Interactive REPL.**
-
-```sh
-hermes
-# At the prompt, ask the same question, then ask a follow-up like
-# "remind me what we just discussed" — multi-turn context should hold.
-# Ctrl-D or /exit when done.
-```
-
-Cleanup:
-
-```sh
-rm "$HERMES_VAULT_PATH/_smoke.md"
-sleep 8
-hermes index --gc           # drops the smoke-test row from the index
-```
-
-If all five pass, you're ready to test Phase A (Telegram notifications).
+Endpoints once running: chat `http://127.0.0.1:8080/v1/chat/completions`,
+embeddings `http://127.0.0.1:8081/v1/embeddings`. Stop with `make stop-daemon`;
+remove agents with `make uninstall`.
 
 ## Commands
 
-| Command                | Purpose                                                    |
-| ---------------------- | ---------------------------------------------------------- |
-| `hermes`               | Drop into the interactive REPL (default).                  |
-| `hermes ask "<q>"`     | One-shot RAG question; streams the answer.                 |
-| `hermes search "<q>"`  | Retrieval only; prints matched chunks and their sources.   |
-| `hermes status`        | Probe both `/health` endpoints and the index size.         |
-| `hermes doctor`        | End-to-end self-diagnostic with one-line `fix:` hints.     |
-| `hermes index`         | Backfill / GC the vault index (one-shot; see below).       |
-| `hermes wiki init`     | Bootstrap the LLM-authored wiki under `<vault>/wiki/`.     |
-| `hermes ingest <path>` | Summarize a raw source into `wiki/sources/<stem>.md`.      |
-| `hermes lint`          | Wiki health-check: orphans, stubs, stale, unused sources.  |
-| `hermes notify`        | Send a Telegram message; `--setup` configures, `--check` validates. |
-| `hermes repl`          | Same as bare `hermes`, with `-k`, `--max-tokens`, `--no-rag`. |
+| Command | Purpose |
+| --- | --- |
+| `hermes` | Interactive REPL (default). Multi-turn, streaming, fresh retrieval per turn. |
+| `hermes ask "<q>"` | One-shot RAG question; streams a cited answer. |
+| `hermes search "<q>"` | Retrieval only; prints matched chunks + scores. |
+| `hermes digest` | Build a daily activity digest; file it in the wiki, optionally push it. |
+| `hermes wiki init` / `status` | Bootstrap / inspect the LLM-authored wiki. |
+| `hermes ingest <path>` | Summarize a raw source into `wiki/sources/`. |
+| `hermes lint` | Wiki health-check: orphans, stubs, stale, unused sources. |
+| `hermes index` | Backfill / GC / migrate the index (see below). |
+| `hermes notify` | Send a Telegram message; `--setup` configures, `--check` validates. |
+| `hermes status` / `doctor` | Health probe / end-to-end self-diagnostic with `fix:` hints. |
 
 ## Talking to your vault
 
-Bare `hermes` (no subcommand) drops into an interactive REPL — multi-turn
-chat, fresh retrieval each turn, streaming output:
+Bare `hermes` drops into the REPL — multi-turn chat with retrieval re-run each
+turn and streamed output:
 
 ```
 $ hermes
-hermes-metal REPL — local second-brain chat.
-  /help              show commands     /clear   reset conversation
-  /sources           show last hits    /save P  save transcript to P
-  /norag             disable RAG       /rag     re-enable RAG
-  Ctrl-C             cancel generation / exit at empty prompt
-  Ctrl-D             exit
-
 hermes>  what did I write yesterday about the auth rewrite?
-  ↳ retrieved 5 chunk(s):
-     - 2026-06-02-daily.md #chunk2  d=0.412
-     - design/auth.md #chunk0  d=0.487
-     ...
-The auth rewrite notes from yesterday flag two open questions [2026-06-02-daily.md]: ...
+  ↳ scoped to yesterday
+  ↳ retrieved 5 chunk(s): 2026-06-06-daily.md #chunk2  d=0.41 ...
+The auth-rewrite notes from yesterday flag two open questions [2026-06-06-daily.md]: ...
 hermes>  remind me which one I said was blocking
-...
 ```
 
-History is kept across turns; retrieval is re-run each turn against your
-latest question (no stale-context bloat). Ctrl-C aborts the current
-generation but keeps you in the REPL; Ctrl-C at an empty prompt (or Ctrl-D)
-exits. Up-arrow recalls past prompts via `~/.hermes/repl_history`.
+History is kept across turns; retrieval re-runs against your latest question.
+Ctrl-C cancels a generation (Ctrl-C at an empty prompt, or Ctrl-D, exits).
+↑ recalls past prompts. Slash commands worth knowing:
 
-For one-shot scripted use, `hermes ask "<question>"` still works.
+- `/file <name>` — promote the last answer into `wiki/topics/<name>.md`.
+- `/wiki` — page counts. `/sources` — last turn's retrievals.
+- `/save <path>` / `/load <path>` — round-trippable transcripts.
+- `/norag` / `/rag` — toggle vault retrieval. `/clear` — wipe history.
+- `/forget-cache` — drop the persisted KV slot.
 
-REPL slash commands worth knowing:
+### Retrieval: temporal scoping + reranking
 
-- `/file <name>` — promote the last assistant turn into
-  `wiki/topics/<name>.md` (the wiki auto-indexes for retrieval).
-- `/wiki` — quick wiki status (page counts, last update).
-- `/save <path>` / `/load <path>` — round-trippable transcripts (markdown).
-- `/sources` — show retrievals from the last turn.
-- `/clear` — wipe conversation; retrieval still works on the next turn.
-- `/norag` / `/rag` — toggle vault retrieval on the fly.
-- `/forget-cache` — drop the persisted KV cache (the REPL silently
-  saves it to slot 0 on exit and restores on next start; see
-  `storage/slots/`).
+Retrieval is date-aware and reranked. A high-precision date phrase
+(`yesterday`, `today`, `last week`, `past 7 days`, `this month`, `2026-06-01`,
+`2026-06`) scopes the search to that window and prints `↳ scoped to …`;
+anything ambiguous falls through to an unscoped search, and an empty window
+widens back automatically. Candidates are then reranked by a blend of semantic
+similarity, recency (30-day half-life), and heading/term overlap before the
+top-k reaches the model. All of this degrades gracefully on an un-migrated
+index.
 
-## Building your wiki
+## The wiki: compounding synthesis
 
-The wiki is a structured, LLM-maintained subtree at `<vault>/wiki/`. You
-keep owning your raw notes; the LLM owns the wiki. The watcher
-automatically indexes wiki pages because they live under your vault, so
-synthesis becomes part of retrieval the moment it's written.
+The wiki is a structured `<vault>/wiki/` subtree the LLM owns; you keep owning
+your raw notes. Because it lives under your vault, the watcher indexes it — so
+synthesis becomes retrievable the moment it's written.
 
 ```
-<vault>/
-├── (your raw notes — the LLM never edits these)
-└── wiki/
-    ├── .hermes-agents.md     ← schema; you edit it, the LLM reads it
-    ├── index.md              ← content-oriented catalog (LLM-maintained)
-    ├── log.md                ← chronological audit (append-only)
-    ├── sources/              ← one summary per ingested raw source
-    ├── topics/               ← concept/entity pages built up over time
-    └── digests/              ← scheduled daily summaries (Phase D, soon)
+<vault>/wiki/
+├── .hermes-agents.md   ← schema you edit; the LLM reads it into its prompt
+├── index.md            ← catalog (LLM-maintained)   log.md ← audit trail
+├── sources/            ← one summary per ingested source
+├── topics/             ← concept pages built from /file
+├── digests/            ← daily summaries (Phase D)
+└── conversations/      ← archived REPL sessions (Phase E)
 ```
-
-### Bootstrap
 
 ```sh
-hermes wiki init        # creates the structure (idempotent)
-hermes wiki status      # page counts and last operation
+hermes wiki init                 # idempotent bootstrap
+hermes ingest path/to/article.md # summarize a source → wiki/sources/<stem>.md
+hermes lint                      # health report (read-only; --strict for CI)
 ```
 
-Edit `<vault>/wiki/.hermes-agents.md` to describe your conventions —
-where daily notes live, how class material is tagged, citation
-preferences. The LLM reads this at REPL/ask startup and threads it into
-the system prompt.
+In the REPL, `/file quant-comparison` files the last answer as a topic page;
+the next query about quantization pulls in that synthesis, not just raw notes.
+Ingest and `/file` never overwrite hand-written files, and update `index.md` /
+`log.md` atomically with rollback.
 
-### Ingest a raw source
+## Daily digest
+
+`hermes digest` summarizes a day's vault activity into a durable wiki page at
+`wiki/digests/YYYY-MM-DD.md`:
+
+- **Activity** — which notes changed (mechanical).
+- **Learnings** — an LLM synthesis (degrades to mechanical-only if the chat
+  server is down).
+- **Practice questions** — only when the day's notes are class material
+  (`#class/*` tag or a `class/`-like path).
+- **Open questions** — TODOs, unchecked `- [ ]` boxes, and `?`-lines.
 
 ```sh
-hermes ingest path/to/article.md
+hermes digest --dry-run          # preview yesterday's digest, no writes
+hermes digest --date 2026-06-06  # a specific day
+make install-digest-daemon       # schedule it (default 07:30 daily)
 ```
 
-Reads the source, drives the chat server with a structured-output
-prompt (Summary / Key claims / Entities / Open questions), and writes
-`wiki/sources/<stem>.md`. Refuses to overwrite hand-written files even
-with `--force`. Repeated ingest of the same source is a no-op without
-`--force`. Updates `wiki/index.md` and `wiki/log.md` atomically — if
-the index update fails, the page is rolled back so the wiki stays
-internally consistent.
-
-### File a REPL answer as a topic page
-
-In the REPL, after asking a question and getting an answer worth
-keeping:
-
-```
-hermes>  what's the difference between Q4_K_M and Q4_0 quantization?
-... (model answers) ...
-hermes>  /file quant-comparison
-(filed → wiki/topics/quant-comparison.md)
-```
-
-Now the next query about "quantization" pulls in this synthesis,
-not just the raw notes.
-
-### Lint the wiki
+It's idempotent (the wiki page is the state) and **never pushes off-device by
+default**. To deliver digests to Telegram, opt in explicitly:
 
 ```sh
-hermes lint                 # orphans, stubs, stale, unused sources
-hermes lint --strict        # exit 1 on any issue (CI-friendly)
-hermes lint --stale-days 60 # adjust the stale threshold
+hermes notify --setup                          # one-time bot setup
+make install-digest-daemon DIGEST_PUSH=1       # enable daily push
 ```
 
-Read-only — output is a report. The user decides what to act on.
+`hermes doctor` warns whenever push is on, since it sends summarized vault
+content to Telegram daily.
 
-### Why this matters
+## Conversation memory
 
-Without the wiki, every query rediscovers knowledge from raw notes.
-With it, your explorations and the LLM's syntheses compound. A subtle
-question that synthesizes five sources is answered once, filed as a
-topic page, and the next time something nearby is asked, the
-synthesis is right there to draw from.
-
-The pattern is described in detail in
-[the LLM Wiki article](https://gist.github.com/) (the gist that
-inspired this layer).
-
-## Notifications (Telegram) — Phase A test guide
-
-Optional, but this is the **wire for the upcoming daily-summary feature**
-(Phase D). Setting it up now means you can verify Phase A end-to-end and
-the daily-summary phases will plug straight in.
-
-### Setup (one time)
-
-**Step 1 — Create a Telegram bot.**
-
-Open Telegram (phone or web), search for [`@BotFather`](https://t.me/BotFather),
-start a chat, send `/newbot`, follow the prompts. BotFather gives you:
-
-- A bot username like `@my_hermes_bot`.
-- A token like `1234567890:ABCDef-ghIJklMnOPqrsTUvwxYZ`.
-
-**Step 2 — Run the setup wizard.**
+Substantial REPL sessions can be archived to `wiki/conversations/` on exit, so
+past chats become retrievable and citable by future digests. It's opt-in:
 
 ```sh
-hermes notify --setup
+export HERMES_REPL_ARCHIVE=1                  # archive sessions on exit
+hermes index --gc-chats --older-than 90       # prune old archives
 ```
-
-It will:
-
-1. Prompt for the BotFather token. Paste it.
-2. Validate the token via `getMe` (you'll see `✓ token OK — bot is @your_bot`).
-3. Ask you to DM the bot. Open Telegram → search for your bot's username
-   → tap **Start** (or just send any message).
-4. Capture your chat_id via long-polling `getUpdates` (`✓ chat_id captured`).
-5. Write `~/.hermes/telegram.json` (mode 0600).
-6. Send a confirmation message — **check your phone, you should see
-   "hermes-metal: notifications are wired up."**
-
-If step 6 doesn't land in your Telegram client, setup didn't work. See
-troubleshooting below.
-
-### Verify Phase A
-
-Three quick checks. All three should pass before you consider Phase A
-done.
-
-**A. Doctor reports the bot healthy.**
-
-```sh
-hermes doctor
-```
-
-The Notifications section should now show:
-
-```
-Notifications (Telegram)
-  [OK  ] telegram token  bot @your_bot_name
-  [OK  ] telegram chat   chat_id=12345 (Your Name)
-```
-
-**B. Manual send round-trips.**
-
-```sh
-hermes notify "ping from $(hostname) at $(date)"
-```
-
-Message should arrive in your Telegram chat within a second or two.
-
-**C. `--check` exits 0.**
-
-```sh
-hermes notify --check && echo OK
-```
-
-Should print `hermes notify: OK — bot @your_bot ...` followed by `OK`.
-
-### What this proves
-
-- Bot token works against Telegram's API (`getMe`).
-- Bot can reach your chat (`getChat`).
-- Long messages chunk and deliver correctly (`sendMessage`).
-- `~/.hermes/telegram.json` was written with secure perms (`stat -f %p
-  ~/.hermes/telegram.json` should end in `600`).
-
-If all three checks pass, **Phase A is verified** and Phase B/C/D can
-start building on top.
-
-### Troubleshooting
-
-- **Setup hangs on "Waiting for your message".** You haven't DM'd the
-  bot yet, or you sent the message before pressing **Start** so Telegram
-  didn't deliver it. Open the bot's profile, tap **Start**, then send
-  any message. Setup polls for 60s before timing out.
-- **Doctor's Notifications section says SKIP after setup.** Config
-  wasn't written — check that `~/.hermes/telegram.json` exists. If you
-  ran setup as a different user, the file is in that user's home dir.
-- **`hermes notify "..."` returns "transport error".** Network issue
-  reaching `api.telegram.org`. Try `curl -sS https://api.telegram.org`
-  to isolate. Some corporate networks block Telegram.
-- **Bot was working, now `--check` returns 1 with "Unauthorized".**
-  Token was revoked (most likely you regenerated it via BotFather).
-  Run `hermes notify --setup` again to re-capture.
-- **Negative chat_id (Telegram supergroup).** Supported and stored as a
-  string. If you want notifications going to a group chat instead of a
-  DM, add the bot to the group, send any message there, and re-run
-  `--setup` — the wizard captures whichever chat sees the message first.
-
-### Config file format
-
-```json
-{
-  "bot_token": "1234567890:ABCDef-ghIJklMnOPqrsTUvwxYZ",
-  "chat_id": "987654321"
-}
-```
-
-Env vars (`HERMES_TELEGRAM_BOT_TOKEN`, `HERMES_TELEGRAM_CHAT_ID`)
-override the file per-key — useful for one-off testing without
-rewriting the config.
 
 ## Indexing
 
-The watcher daemon catches **future** writes. For an existing vault, or to
-clean up after files were moved while the daemon was stopped:
+The watcher catches **future** writes. For an existing vault, or after files
+moved while the daemon was stopped:
 
 ```sh
-hermes index --backfill           # walk the vault, embed anything missing
-hermes index --backfill --force   # re-embed everything (e.g. after upgrading the embed model)
-hermes index --gc --dry-run       # show orphan rows that would be removed
-hermes index --gc                 # actually remove them
-hermes index --backfill --gc      # both, in order
+hermes index --backfill          # embed anything missing
+hermes index --backfill --force  # re-embed everything (e.g. after a model change)
+hermes index --gc                # drop rows whose source file is gone
+hermes index --migrate           # upgrade an old index to the metadata schema
 ```
 
-Hot tip: a fresh install on an existing vault should be `make all && hermes
-index --backfill` — `make all` brings the daemons up but the index starts
-empty, so the watcher would otherwise need every file touched once.
+`--migrate` adds the `mtime`/`tags`/`heading_trail` columns in place (instant,
+lossless) and re-embeds only the rows whose metadata is still placeholder.
+`hermes doctor` flags a pre-migration index with the exact fix. GC refuses to
+drop ≥90% of sources without `--force` (usually means the vault moved).
 
-GC refuses to drop ≥90% of sources without `--force` — the most common
-cause of "everything looks orphan" is moving the vault root, and wiping
-the whole index in that case is recoverable only by re-running backfill.
+**Vault filter.** Indexes `*.md` / `*.markdown`; excludes `.obsidian/`,
+`.trash/`, `attachments/`, `templates/`. Override per-session with
+`HERMES_VAULT_INCLUDE` / `HERMES_VAULT_EXCLUDE` (colon-separated globs), or
+commit `config/vault.yaml` (see the `.example`). The watcher and `hermes index`
+share one filter, so live and one-shot indexing always agree.
 
-### Vault filter
+## Configuration
 
-By default the index includes `*.md` and `*.markdown`, and excludes
-`.obsidian/`, `.trash/`, `attachments/`, and `templates/`. Override per-
-session with env vars (colon-separated globs, replacing — not merging —
-the defaults):
+Env-driven; defaults work.
 
-```sh
-export HERMES_VAULT_INCLUDE="*.md:*.txt"
-export HERMES_VAULT_EXCLUDE=".obsidian:.git:Archive/*"
-```
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `HERMES_VAULT_PATH` | `~/Documents/Obsidian` | |
+| `HERMES_LANCEDB_PATH` | `<repo>/storage/lancedb` | |
+| `HERMES_CHAT_URL` | `http://127.0.0.1:8080` | |
+| `HERMES_EMBED_URL` | `http://127.0.0.1:8081/v1/embeddings` | |
+| `HERMES_DIGEST_PUSH` | `0` | `1` + a configured bot enables daily Telegram push |
+| `HERMES_REPL_ARCHIVE` | `0` | `1` archives substantial REPL sessions to the wiki |
 
-Or commit a permanent override at `config/vault.yaml` (see
-`config/vault.yaml.example`). The watcher and `hermes index` both
-consume the same filter, so the live and one-shot paths always agree.
+Hardware tier (context window, threads) is auto-detected via `sysctl` into
+`config/host_topology.env`. See `CLAUDE.md` for the full spec.
 
 ## Troubleshooting
-
-Stuck? Run the self-diagnostic:
 
 ```sh
 hermes doctor          # or: make doctor
 ```
 
-It walks the install end-to-end (host arch, Xcode CLT, `llama.cpp` build,
-`.venv`, models, agents, ports, both `/health` endpoints, LanceDB on disk)
-and prints a one-line `fix:` for everything that isn't OK. It exits `0` if
-ready, `1` on FAIL — safe to chain in scripts:
-
-```sh
-make doctor && hermes ask "what did I write yesterday?"
-```
-
-Doctor is stdlib-only and falls back to `/usr/bin/env python3` when the venv
-is broken — exactly when you need it. Use `--json` for machine-readable
-output.
-
-## Architecture
-
-```
-write path (background, debounced):
-  Obsidian Vault ─► watchdog daemon ─► nomic-embed (:8081) ─► LanceDB
-
-query path (per turn):
-  hermes repl / ask ─► nomic-embed (:8081) ─► LanceDB top-k
-                                                      │
-                                                      ▼
-                                       hermes-8b (:8080) ─► streamed tokens
-```
-
-Three cooperating LaunchAgents:
-
-- **`com.hermes.metal.engine`** — `llama-server` with Hermes-3-8B (Q4_K_M)
-  on `:8080`. Chat + completions, KV-slot persistence, OpenAI-compatible.
-- **`com.hermes.metal.embed`** — `llama-server --embedding` with
-  `nomic-embed-text-v1.5` on `:8081`. Mean-pooled, 768-dim.
-- **`com.hermes.metal.watcher`** — Python `watchdog` daemon that debounces
-  Obsidian save bursts, hashes content (skip no-op writes), chunks the
-  Markdown, and upserts into LanceDB.
-
-All three run under `ProcessType=Background` + `Nice=15` so foreground apps
-keep the CPU. KeepAlive respawns crashed agents; `make uninstall` is the
-clean stop.
-
-## Configuration
-
-Env-driven. Defaults work; override as needed.
-
-| Variable              | Default                              |
-| --------------------- | ------------------------------------ |
-| `HERMES_VAULT_PATH`   | `~/Documents/Obsidian`               |
-| `HERMES_LANCEDB_PATH` | `<repo>/storage/lancedb`             |
-| `HERMES_CHAT_URL`     | `http://127.0.0.1:8080`              |
-| `HERMES_EMBED_URL`    | `http://127.0.0.1:8081/v1/embeddings`|
-
-Hardware tier (context window, threads) is auto-detected via `sysctl` and
-written to `config/host_topology.env`. See `CLAUDE.md` for the full spec.
+Walks the install end-to-end — host arch, build, venv, models, agents, ports,
+both `/health` endpoints, LanceDB schema version, wiki, notifications, digest —
+and prints a one-line `fix:` for anything that isn't OK. Stdlib-only and falls
+back to system `python3` when the venv is broken. Exit 0 if ready, 1 on FAIL;
+`--json` for machine output.
 
 ## Tests
 
-Pure-Python coverage of the load-bearing pieces (chunker, REPL trim &
-transcript parser, vault filter, index command, watcher × filter
-integration, SSE streaming):
-
 ```sh
-make test          # runs `pytest tests/ -v` in the project venv
+make test     # pytest tests/ -v — pure-Python, no daemons or network
 ```
 
-No daemons or network required — `tests/test_streaming.py` mocks
-`llama-server` via `httpx.MockTransport`.
+206 tests cover the load-bearing pieces: chunker, schema migration, reranker,
+temporal parser, digest, conversation archive, vault filter, wiki, REPL trim,
+and SSE streaming (mocked via `httpx.MockTransport`).
 
 ## Benchmarks
 
-Head-to-head against MLX 4-bit on the same Hermes-3-Llama-3.1-8B — same
-weights, same prompts, `temperature=0`, `seed=42`. See `bench/README.md`
-for the harness.
+Head-to-head vs MLX 4-bit on the same Hermes-3-8B (`temperature=0`, `seed=42`).
+See `bench/README.md`.
 
-```sh
-make bench              # throughput + perplexity (no sudo)
-sudo make bench-power   # adds powermetrics telemetry
-make bench-report       # write bench/results/REPORT.md
-```
-
-Measured on M3 Pro (36 GiB, 6P+6E, macOS 26.4):
-
-| Axis | hermes-metal (llama.cpp Q4_K_M) | MLX 4-bit | Winner |
+| Axis | hermes (llama.cpp Q4_K_M) | MLX 4-bit | Winner |
 | --- | --- | --- | --- |
-| Decode tok/s (medium prompt)   | 19.3   | **28.8**   | MLX +49% |
-| Prefill tok/s (long prompt)    | 320.1  | **357.3**  | MLX +12% |
-| **Peak RSS** (long prompt)     | **298 MiB**  | 1,806 MiB  | **llama.cpp 6×** |
-| **Perplexity** (WikiText-2)    | **8.40**     | 11.72      | **llama.cpp Δ −3.32** |
+| Decode tok/s (medium) | 19.3 | **28.8** | MLX +49% |
+| Prefill tok/s (long) | 320.1 | **357.3** | MLX +12% |
+| **Peak RSS** (long) | **298 MiB** | 1,806 MiB | **llama.cpp 6×** |
+| **Perplexity** (WikiText-2) | **8.40** | 11.72 | **llama.cpp** |
 
-The honest framing: MLX wins raw throughput; **llama.cpp wins memory by
-6× and perplexity by a wide margin** at the same nominal 4 bpw. Q4_K_M's
-K-quants super-blocks preserve quality far better than MLX's group-wise
-affine quantization, and llama.cpp's `mmap`'d weights + `q8_0` KV cache
-keep the always-on daemon's footprint dramatically smaller. For an
-always-on background "second brain," memory and quality are the right
-axes to win on.
-
-(RSS caveat: llama.cpp `mmap`s the GGUF, so shared file-backed pages are
-counted differently from MLX's MLX-buffer allocations. The structural
-gap is still large — q8_0 KV cache alone is the biggest lever.)
+MLX wins raw throughput; llama.cpp wins memory by 6× and perplexity by a wide
+margin at the same 4 bpw. For an always-on background daemon, memory and
+quality are the right axes — which is also why the reranker is a heuristic, not
+another model to keep resident.
 
 ## Changelog
 
-Substantive changes are tracked in [`IMPROVEMENTS.md`](IMPROVEMENTS.md) —
-problem, change, impact for each one, newest first.
+Substantive changes — problem, change, impact — are tracked newest-first in
+[`IMPROVEMENTS.md`](IMPROVEMENTS.md).
 
 ## License
 

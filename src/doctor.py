@@ -587,6 +587,32 @@ def check_index() -> Section:
             "index rows", OK,
             f"{fragment_count} fragment file(s) under {shown}",
         ))
+
+    # Schema version from the stdlib-readable sidecar the LanceVault writes on
+    # migrate (we never import lancedb here). Absent sidecar on a populated
+    # table = an old (pre-Phase-C) index → WARN with the migrate remediation.
+    hint = db / ".hermes-schema.json"
+    if fragment_count != 0:
+        if hint.is_file():
+            try:
+                meta = json.loads(hint.read_text(encoding="utf-8"))
+                ver = meta.get("schema_version")
+                metric = meta.get("metric", "?")
+                if ver == 2:
+                    s.add(Result("schema", OK, f"v2 (metadata-rich, metric={metric})"))
+                else:
+                    s.add(Result(
+                        "schema", WARN, f"v{ver} (pre-metadata)",
+                        fix="hermes index --migrate   # add mtime/tags/heading_trail + rerank support.",
+                    ))
+            except (OSError, json.JSONDecodeError):
+                s.add(Result("schema", WARN, "schema hint unreadable",
+                             fix="hermes index --migrate   # rewrites the schema hint."))
+        else:
+            s.add(Result(
+                "schema", WARN, "no schema hint (index predates Phase C)",
+                fix="hermes index --migrate   # upgrade to the metadata-rich schema.",
+            ))
     return s
 
 
@@ -682,10 +708,12 @@ def check_wiki() -> Section:
     sources = list(paths.sources_dir.glob("*.md")) if paths.sources_dir.is_dir() else []
     topics = list(paths.topics_dir.glob("*.md")) if paths.topics_dir.is_dir() else []
     digests = list(paths.digests_dir.glob("*.md")) if paths.digests_dir.is_dir() else []
+    convos = list(paths.conversations_dir.glob("*.md")) if paths.conversations_dir.is_dir() else []
     s.add(Result(
         "wiki",
         OK,
-        f"{paths.root.name}/  sources={len(sources)} topics={len(topics)} digests={len(digests)}",
+        f"{paths.root.name}/  sources={len(sources)} topics={len(topics)} "
+        f"digests={len(digests)} conversations={len(convos)}",
     ))
     return s
 
@@ -750,6 +778,48 @@ def check_notifications() -> Section:
     return s
 
 
+def check_digest() -> Section:
+    """Report the daily-digest LaunchAgent + its privacy posture.
+
+    SKIP when the digest agent isn't installed (it's opt-in). When installed,
+    report the schedule and — importantly — WARN if push is on, because that
+    means summarized vault content is sent to Telegram daily. Surfacing the
+    privacy choice is a hard requirement from the Phase D design.
+    """
+    s = Section("Digest (daily summary)")
+    plist = Path.home() / "Library" / "LaunchAgents" / "com.hermes.metal.digest.plist"
+    if not plist.is_file():
+        s.add(Result(
+            "digest agent", SKIP,
+            "not installed (opt-in)",
+            fix="make install-digest-daemon   # optional daily vault summary.",
+        ))
+        return s
+    try:
+        with plist.open("rb") as fh:
+            data = plistlib.load(fh)
+    except (plistlib.InvalidFileException, OSError) as exc:
+        s.add(Result("digest agent", FAIL, f"plist unreadable: {exc}",
+                     fix="make install-digest-daemon   # re-render the agent."))
+        return s
+
+    cal = data.get("StartCalendarInterval") or {}
+    when = f"{cal.get('Hour', '?'):0>2}:{cal.get('Minute', 0):0>2}" if cal else "?"
+    s.add(Result("digest agent", OK, f"installed; fires daily at {when}"))
+
+    env = data.get("EnvironmentVariables") or {}
+    push = str(env.get("HERMES_DIGEST_PUSH", "0")).strip().lower() in ("1", "true", "yes", "on")
+    if push:
+        s.add(Result(
+            "digest push", WARN,
+            "ON — summarized vault content is sent to Telegram daily",
+            fix="set HERMES_DIGEST_PUSH=0 in the plist (or `make install-digest-daemon DIGEST_PUSH=0`) to disable.",
+        ))
+    else:
+        s.add(Result("digest push", OK, "off (digests are written to the wiki only)"))
+    return s
+
+
 def run_all() -> list[Section]:
     return [
         check_host(),
@@ -763,6 +833,7 @@ def run_all() -> list[Section]:
         check_index(),
         check_wiki(),
         check_notifications(),
+        check_digest(),
     ]
 
 

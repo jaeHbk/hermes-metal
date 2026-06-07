@@ -66,6 +66,17 @@ WATCH_LABEL     := com.hermes.metal.watcher
 WATCH_PLIST     := $(HOME)/Library/LaunchAgents/$(WATCH_LABEL).plist
 WATCH_TARGET    := $(GUI_DOMAIN)/$(WATCH_LABEL)
 
+DIGEST_LABEL    := com.hermes.metal.digest
+DIGEST_PLIST    := $(HOME)/Library/LaunchAgents/$(DIGEST_LABEL).plist
+DIGEST_TARGET   := $(GUI_DOMAIN)/$(DIGEST_LABEL)
+DIGEST_TEMPLATE := $(CONFIG_DIR)/digest.plist.template
+# Daily digest fire time (local). Override: make install-digest-daemon DIGEST_HOUR=6
+DIGEST_HOUR     ?= 7
+DIGEST_MINUTE   ?= 30
+# Privacy gate: 0 = write the local wiki page only; 1 = also push to Telegram
+# (requires `hermes notify --setup`). Default OFF.
+DIGEST_PUSH     ?= 0
+
 # HERMES_VAULT_PATH is consulted at install time so the watcher LaunchAgent
 # has a concrete path baked into its plist EnvironmentVariables.
 VAULT_PATH      := $(if $(HERMES_VAULT_PATH),$(HERMES_VAULT_PATH),$(HOME)/Documents/Obsidian)
@@ -74,6 +85,7 @@ VAULT_PATH      := $(if $(HERMES_VAULT_PATH),$(HERMES_VAULT_PATH),$(HOME)/Docume
 
 .PHONY: all init check-env build-engine setup-venv fetch-model fetch-embed-model \
         install-daemon install-engine-daemon install-embed-daemon install-watcher-daemon \
+        install-digest-daemon uninstall-digest-daemon \
         install-cli uninstall-cli \
         start-daemon stop-daemon clean-cache uninstall doctor test help \
         bench bench-setup bench-throughput bench-perplexity bench-power bench-report
@@ -108,6 +120,9 @@ help:
 	@echo "  make install-engine-daemon   Render only com.hermes.metal.engine."
 	@echo "  make install-embed-daemon    Render only com.hermes.metal.embed."
 	@echo "  make install-watcher-daemon  Render only com.hermes.metal.watcher."
+	@echo "  make install-digest-daemon   Schedule the daily digest (opt-in). Vars:"
+	@echo "                           DIGEST_HOUR=7 DIGEST_MINUTE=30 DIGEST_PUSH=0."
+	@echo "                           DIGEST_PUSH=1 also pushes to Telegram (privacy: off by default)."
 	@echo ""
 	@echo "  make install-cli         Symlink bin/hermes into a directory on PATH"
 	@echo "                           (default ~/.local/bin; override with PREFIX=...)"
@@ -367,6 +382,38 @@ install-watcher-daemon:
 	@echo "    rendered:    $(WATCH_PLIST)"
 	@$(MAKE) --no-print-directory _bootstrap PLIST=$(WATCH_PLIST) TARGET=$(WATCH_TARGET)
 
+install-digest-daemon:
+	@echo "==> install-digest-daemon: render + bootstrap $(DIGEST_LABEL)"
+	@if [ ! -f "$(DIGEST_TEMPLATE)" ]; then \
+		echo "ERROR: $(DIGEST_TEMPLATE) missing."; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(ENGINE_FLAGS)" ]; then \
+		echo "ERROR: $(ENGINE_FLAGS) missing."; \
+		exit 1; \
+	fi
+	@if [ ! -x "$(VENV_PY)" ]; then \
+		echo "ERROR: $(VENV_PY) missing. Run 'make setup-venv' first."; \
+		exit 1; \
+	fi
+	@mkdir -p "$(HOME)/Library/LaunchAgents" "$(LOGS_DIR)"
+	@. "$(ENGINE_FLAGS)"; \
+	echo "    vault=$(VAULT_PATH)  fire=$(DIGEST_HOUR):$(DIGEST_MINUTE)  push=$(DIGEST_PUSH)"; \
+	if [ "$(DIGEST_PUSH)" = "1" ]; then \
+		echo "    NOTE: push=1 — digests will be SENT TO TELEGRAM daily. Run 'hermes notify --setup' if you haven't."; \
+	fi; \
+	sed \
+		-e "s|{WORKING_DIR}|$(WORKING_DIR)|g" \
+		-e "s|{VAULT_PATH}|$(VAULT_PATH)|g" \
+		-e "s|{ENGINE_PORT}|$$ENGINE_PORT|g" \
+		-e "s|{EMBED_PORT}|$$EMBED_PORT|g" \
+		-e "s|{DIGEST_HOUR}|$(DIGEST_HOUR)|g" \
+		-e "s|{DIGEST_MINUTE}|$(DIGEST_MINUTE)|g" \
+		-e "s|{DIGEST_PUSH}|$(DIGEST_PUSH)|g" \
+		"$(DIGEST_TEMPLATE)" > "$(DIGEST_PLIST)"
+	@echo "    rendered:    $(DIGEST_PLIST)"
+	@$(MAKE) --no-print-directory _bootstrap PLIST=$(DIGEST_PLIST) TARGET=$(DIGEST_TARGET)
+
 # Internal helper: lint + bootstrap (or legacy load) a rendered plist.
 # Invoked by install-{engine,embed,watcher}-daemon. Not in .PHONY because it's
 # a private hook; underscore prefix signals "do not call directly."
@@ -458,12 +505,17 @@ test:
 
 # ----- uninstall ------------------------------------------------------------
 
+uninstall-digest-daemon:
+	@echo "==> uninstall-digest-daemon: bootout + remove $(DIGEST_LABEL)"
+	@launchctl bootout "$(DIGEST_TARGET)" 2>/dev/null || true
+	@[ -f "$(DIGEST_PLIST)" ] && (launchctl unload "$(DIGEST_PLIST)" 2>/dev/null || true; rm -f "$(DIGEST_PLIST)"; echo "    removed:     $(DIGEST_PLIST)") || echo "    (not installed)"
+
 uninstall:
-	@echo "==> uninstall: bootout + remove all three agent plists"
-	@for tgt in $(ENGINE_TARGET) $(EMBED_TARGET) $(WATCH_TARGET); do \
+	@echo "==> uninstall: bootout + remove all agent plists (engine, embed, watcher, digest)"
+	@for tgt in $(ENGINE_TARGET) $(EMBED_TARGET) $(WATCH_TARGET) $(DIGEST_TARGET); do \
 		launchctl bootout "$$tgt" 2>/dev/null || true; \
 	done
-	@for plist in $(ENGINE_PLIST) $(EMBED_PLIST) $(WATCH_PLIST); do \
+	@for plist in $(ENGINE_PLIST) $(EMBED_PLIST) $(WATCH_PLIST) $(DIGEST_PLIST); do \
 		[ -f "$$plist" ] && (launchctl unload "$$plist" 2>/dev/null || true; rm -f "$$plist"; echo "    removed:     $$plist") || true; \
 	done
 	@echo ""

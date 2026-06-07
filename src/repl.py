@@ -108,6 +108,9 @@ DEFAULT_K = 5
 DEFAULT_MAX_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.4
 DEFAULT_MAX_CONTEXT_CHARS = 8000
+# Over-fetch factor for the rerank stage (see src.cli). Vector search returns
+# k * this many candidates; the reranker trims back to k.
+RERANK_FETCH_MULTIPLIER = 4
 
 # Drop oldest turn pairs when approx-token estimate of the outgoing payload
 # exceeds this fraction of the model's context window. Conservative because
@@ -331,6 +334,10 @@ async def _retrieve(
 ) -> list[dict[str, Any]]:
     """Fetch top-k chunks for ``query``. Returns [] on any soft failure.
 
+    Mirrors ``src.cli._retrieve``: embed → optional temporal scoping → vector
+    over-fetch → heuristic rerank → top-k. Both surfaces share the same
+    ``temporal`` / ``reranker`` modules so live and one-shot retrieval agree.
+
     Soft failures (embed server down, vault empty, db missing) MUST return []
     rather than raise — the REPL should keep going with a no-RAG turn rather
     than dying because the embed agent crashed.
@@ -341,6 +348,9 @@ async def _retrieve(
     Punt it to a worker thread so the loop stays responsive — same for the
     LanceDB calls, which can also block on disk I/O.
     """
+    import time as _time
+    from src.backend import temporal, reranker
+
     if vault is None:
         return []
     try:
@@ -355,10 +365,25 @@ async def _retrieve(
         qvec = vecs[0]
     except (httpx.HTTPError, ValueError, IndexError):
         return []
+
+    has_meta = getattr(vault, "has_metadata", False)
+    where = None
+    window = temporal.parse_window(query) if has_meta else None
+    if window is not None:
+        where = window.where_clause()
+        print(f"  ↳ scoped to {window.phrase}", file=sys.stderr)
+
+    fetch_k = k * RERANK_FETCH_MULTIPLIER if has_meta else k
     try:
-        return await asyncio.to_thread(vault.search, qvec, k=k)
+        hits = await asyncio.to_thread(vault.search, qvec, k=fetch_k, filter=where)
+        if window is not None and not hits:
+            print(f"  ↳ no notes in {window.phrase}; widening to all notes", file=sys.stderr)
+            hits = await asyncio.to_thread(vault.search, qvec, k=fetch_k)
     except Exception:  # noqa: BLE001
         return []
+    if not has_meta:
+        return hits[:k]
+    return reranker.rerank(query, hits, k=k, now=_time.time(), metric="cosine")
 
 
 # ----------------------------------------------------------------- streaming
@@ -729,8 +754,9 @@ def _cmd_wiki(_session: ChatSession) -> None:
     sources = list(paths.sources_dir.glob("*.md")) if paths.sources_dir.is_dir() else []
     topics = list(paths.topics_dir.glob("*.md")) if paths.topics_dir.is_dir() else []
     digests = list(paths.digests_dir.glob("*.md")) if paths.digests_dir.is_dir() else []
+    convos = list(paths.conversations_dir.glob("*.md")) if paths.conversations_dir.is_dir() else []
     print(f"wiki: {paths.root}")
-    print(f"  sources={len(sources)}  topics={len(topics)}  digests={len(digests)}")
+    print(f"  sources={len(sources)}  topics={len(topics)}  digests={len(digests)}  conversations={len(convos)}")
 
 
 def _cmd_load(session: ChatSession, arg: str) -> None:
@@ -956,6 +982,19 @@ async def _async_run(session: ChatSession) -> int:
                     )
                 except (HermesError, asyncio.TimeoutError):
                     pass
+            # Phase E: archive a substantial session to the wiki so it's
+            # retrievable next time and citable by the digest. Opt-in
+            # (HERMES_REPL_ARCHIVE=1) and best-effort — an archive failure must
+            # never block REPL exit. `/file` remains the explicit alternative.
+            try:
+                from src import conversation as _conv
+                if _conv.archive_enabled() and session.history:
+                    archived = _conv.archive_session(session.history)
+                    if archived is not None:
+                        print(f"(archived this session → {archived.name})", file=sys.stderr)
+            except Exception:  # noqa: BLE001 — never let archiving break exit
+                pass
+
             if vault is not None:
                 close = getattr(vault, "close", None)
                 if callable(close):
