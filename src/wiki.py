@@ -68,6 +68,10 @@ class WikiPaths:
     def digests_dir(self) -> Path:
         return self.root / "digests"
 
+    @property
+    def conversations_dir(self) -> Path:
+        return self.root / "conversations"
+
 
 def resolve_wiki_path(vault_path: str | Path | None = None) -> Path:
     """Resolve the wiki root.
@@ -170,6 +174,10 @@ and `/file`. Don't edit by hand — your edits will be overwritten.
 ## Digests
 
 (none yet — Phase D writes daily digests here)
+
+## Conversations
+
+(none yet — substantial REPL sessions are archived here)
 """
 
 _DEFAULT_LOG = """\
@@ -195,6 +203,7 @@ def init_wiki(paths: WikiPaths | None = None, *, force: bool = False) -> WikiPat
     p.sources_dir.mkdir(exist_ok=True)
     p.topics_dir.mkdir(exist_ok=True)
     p.digests_dir.mkdir(exist_ok=True)
+    p.conversations_dir.mkdir(exist_ok=True)
 
     if force or not p.schema.is_file():
         _atomic_write_text(p.schema, _DEFAULT_SCHEMA)
@@ -318,11 +327,16 @@ def update_index_row(
     rows after multiple ingests of the same page.
     """
     section = section.strip()
-    if section not in ("Sources", "Topics", "Digests"):
+    if section not in ("Sources", "Topics", "Digests", "Conversations"):
         raise ValueError(f"unknown index section: {section!r}")
 
     # Map section -> subdirectory name for relative links.
-    subdir_map = {"Sources": "sources", "Topics": "topics", "Digests": "digests"}
+    subdir_map = {
+        "Sources": "sources",
+        "Topics": "topics",
+        "Digests": "digests",
+        "Conversations": "conversations",
+    }
     subdir = subdir_map[section]
     rel_link = f"{subdir}/{page_name}.md"
     new_row = f"- [{page_name}]({rel_link}) — {summary.strip()}"
@@ -343,7 +357,7 @@ def update_index_row(
 # Heuristic: index pages are markdown lists under ## headers. We rebuild
 # only the three known sections; everything else (page header, blurb)
 # is preserved verbatim.
-_SECTION_RE = re.compile(r"^## (Sources|Topics|Digests)\s*$", re.MULTILINE)
+_SECTION_RE = re.compile(r"^## (Sources|Topics|Digests|Conversations)\s*$", re.MULTILINE)
 
 
 def _split_index(text: str) -> dict[str, list[str]]:
@@ -377,20 +391,29 @@ def _join_index(sections: dict[str, list[str]], *, original: str) -> str:
     for match in _SECTION_RE.finditer(original):
         name = match.group(1)
         seen.add(name)
-        out_lines.append(original[last_end:match.end()])
+        # The slice from last_end to match.end() is "<preamble/prev-body>\n##
+        # Header". rstrip() it so blank lines the previous rebuild left between
+        # the header and its body don't accumulate on every write (the section
+        # regex's trailing \s* otherwise re-captures them, growing index.md
+        # without bound across daily digests / per-session archives). We then
+        # re-emit exactly one blank line before the body.
+        out_lines.append(original[last_end:match.end()].rstrip())
         rows = sections.get(name, [])
         out_lines.append("\n\n")
         out_lines.append("\n".join(rows) if rows else "(none)")
         out_lines.append("\n\n")
         next_match = _SECTION_RE.search(original, pos=match.end())
         last_end = next_match.start() if next_match else len(original)
-    out_lines.append(original[last_end:])
+    # Trailing slice (after the last known section): collapse leading blank
+    # lines for the same reason, then keep the remainder verbatim.
+    tail = original[last_end:]
+    out_lines.append(tail.lstrip("\n") if tail else tail)
     rebuilt = "".join(out_lines).rstrip()
 
     # Append any sections that didn't appear in the original. We only
     # emit a header for a missing section if it has rows to write —
     # otherwise we'd pollute the index with empty stubs.
-    for name in ("Sources", "Topics", "Digests"):
+    for name in ("Sources", "Topics", "Digests", "Conversations"):
         if name in seen:
             continue
         rows = sections.get(name, [])
@@ -449,7 +472,7 @@ def all_pages(paths: WikiPaths) -> list[Path]:
     if not paths.root.is_dir():
         return []
     out: list[Path] = []
-    for sub in (paths.sources_dir, paths.topics_dir, paths.digests_dir):
+    for sub in (paths.sources_dir, paths.topics_dir, paths.digests_dir, paths.conversations_dir):
         if sub.is_dir():
             for p in sub.iterdir():
                 if p.is_file() and p.suffix == ".md":

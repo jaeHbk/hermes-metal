@@ -145,7 +145,9 @@ def run(argv: list[str] | None = None) -> int:
         elif path.parent == paths.topics_dir:
             if inbound == 0:
                 orphans.append(path)
-        # digests/ — never flagged as orphan
+        # digests/ and conversations/ — chronologically terminal, never
+        # flagged as orphan (a daily digest or an archived chat doesn't need
+        # an inbound link to be useful).
 
     # --- stubs: link targets that don't have a matching page.
     referenced = set().union(*out_links.values()) if out_links else set()

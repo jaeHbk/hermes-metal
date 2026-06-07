@@ -8,6 +8,108 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-07 — Daily-summary cascade: temporal retrieval, metadata schema + rerank, digest, conversation memory (Phases B→C→D→E)
+
+**Problem:** The wiki layer made synthesis *durable*, but retrieval was still
+naive: plain top-k vector search on L2 distance, no recency, no metadata, no
+date awareness. "What did I write yesterday?" couldn't actually scope to
+yesterday. There was no scheduled summary, and unmarked REPL conversations
+evaporated on exit. The four phases below were the planned cascade (each
+enables the next); they shipped together.
+
+**Change:**
+
+* **Phase C — metadata-rich schema + reranker** (the linchpin). LanceDB schema
+  v2 adds `mtime`, `tags`, `heading_trail` columns. Migration is **in-place,
+  lossless, and instant** (`add_columns`; existing vectors untouched) and runs
+  automatically on `LanceVault` open — verified against a copy of the live
+  index (7 rows, 0 lost). A stdlib-readable `.hermes-schema.json` sidecar lets
+  `doctor` report the version without importing lancedb. `hermes index
+  --migrate` upgrades the schema and re-embeds **only** the rows whose metadata
+  is still placeholder (via `sources_with_stale_metadata()`), so a big vault
+  isn't fully reprocessed. Search switched to **cosine** (correct for
+  L2-normalized nomic embeddings; it's a query-time choice, so no migration
+  needed). New `src/backend/reranker.py`: a zero-dependency heuristic
+  (semantic + recency half-life + heading/lexical overlap) reorders an
+  over-fetched candidate set down to top-k. Chose a heuristic over a
+  cross-encoder deliberately — the always-on daemon's footprint is the whole
+  project's thesis; a 280 MB reranker model would undo the benchmark win.
+* **Phase B — temporal awareness.** New `src/backend/temporal.py`:
+  `parse_window` maps **high-precision** phrases (`yesterday`, `today`,
+  `last week`, `past N days`, `this month`, ISO dates, `YYYY-MM`) to an mtime
+  window + (for single days) a `source_path LIKE '%YYYY-MM-DD%'` clause for
+  daily notes. Anything ambiguous returns `None` and falls through to an
+  unscoped search — a misparse that silently scopes to the wrong dates is
+  worse than no scoping. Scoping is printed (`↳ scoped to yesterday`) and an
+  empty window widens back to all notes. Wired into both `hermes ask` and the
+  REPL.
+* **Phase D — `hermes digest` + scheduled delivery.** New `src/digest.py` and
+  `hermes digest [--date] [--dry-run] [--no-push] [--force]`. Walks the vault
+  for notes in a day's mtime window, builds four sections — Activity
+  (mechanical), Learnings (LLM, degrades to mechanical-only if the chat server
+  is down), Practice questions (gated on class-material detection), Open
+  questions (TODOs / `- [ ]` / `?`-lines, code-fence-aware, deduped). Writes a
+  durable `wiki/digests/YYYY-MM-DD.md` (managed, indexed, so it compounds and
+  is retrievable) and — **only with explicit opt-in** (`HERMES_DIGEST_PUSH=1`
+  *and* a configured bot) — pushes a headline + the full markdown via
+  Telegram. Idempotent (the wiki page is the state). New
+  `config/digest.plist.template` (`StartCalendarInterval`, not KeepAlive) and
+  `make install-digest-daemon` (`DIGEST_HOUR`/`MINUTE`/`PUSH` vars). Doctor
+  gains a Digest section that **warns when push is on**.
+* **Phase E — cross-session conversation memory.** The wiki *is* the memory.
+  New `src/conversation.py`: on REPL exit, a substantial session (opt-in via
+  `HERMES_REPL_ARCHIVE=1`) is archived to `wiki/conversations/<ts>.md` as a
+  managed page — auto-indexed, citable by the digest, retrievable next turn.
+  `hermes index --gc-chats --older-than N` prunes old archives (built in from
+  day one so the directory can't metastasize). Wiki gained a `Conversations`
+  index section; lint treats conversations (like digests) as chronologically
+  terminal.
+
+**Adversarial review (6 parallel reviewers × per-finding verifiers, 24 agents)
+plus a hand audit caught 7 real bugs, all fixed:**
+
+1. **Concurrent-migration crash** (hand audit): the watcher auto-migrates on
+   open while `index --migrate` runs in another process; `add_columns` raises
+   "column already exists" for the loser, crashing the watcher daemon.
+   `migrate()` now adds each column independently and treats already-exists as
+   success (re-checking the live schema).
+2. **Unbounded blank-line growth in `index.md`** (hand audit): `_join_index`
+   re-captured the blank line it left between a header and its body on every
+   write (3→12 newlines after 10 writes) — a real problem under daily digests
+   and per-session archives. Now normalizes the separator to one blank line.
+3. **ISO-date regex matched inside identifiers**: `report-2026-06-07.md` in a
+   query mis-scoped retrieval to that date. Replaced `\b` with
+   `(?<![-\d])…(?![-\d])` so only standalone date tokens match.
+4. **ISO-month regex** had the same hyphen-boundary flaw; same fix.
+5. **Digest TOCTOU**: the hand-written-file guard ran before a multi-second
+   LLM call, so a user file created in that window could be clobbered.
+   Re-checked at write time inside `write_digest_page`.
+6. **Conversation dangling index row**: an `append_log` failure after the
+   index row was committed rolled back the page, stranding the index row at a
+   deleted file. The audit log is now best-effort (separate from the
+   load-bearing page+index write).
+7. **Doctor `check_wiki`** omitted the conversations count; added.
+
+The review also *refuted* 12 findings — including two (the blank-line growth
+and the migration race) that the verifiers correctly marked refuted because
+they read the already-fixed code. Net: the verification loop did its job.
+
+**Files:** `src/backend/database.py`, `src/backend/indexer.py`,
+`src/backend/reranker.py` (new), `src/backend/temporal.py` (new),
+`src/digest.py` (new), `src/conversation.py` (new), `src/index_cmd.py`,
+`src/cli.py`, `src/repl.py`, `src/doctor.py`, `src/wiki.py`, `src/wiki_cmd.py`,
+`src/lint_cmd.py`, `config/digest.plist.template` (new), `Makefile`, and five
+new test files (`test_temporal`, `test_reranker`, `test_database_migration`,
+`test_digest`, `test_conversation`).
+
+**Impact:** Retrieval is now recency- and date-aware and reranked; the schema
+migrates losslessly with a clear `doctor` signal; the daily digest closes the
+original CLAUDE.md goal of a pushed daily summary (privacy default-off); and
+conversations compound into the same wiki the rest of the system already
+draws on. Tests: 141 → 206 passing, no daemons or network required.
+
+---
+
 ## 2026-06-04 — Wiki layer (architectural pivot from retrieval-only to compounding synthesis)
 
 **Problem:** Every query rediscovered knowledge from raw notes from
@@ -188,72 +290,23 @@ Promotion rule: when something here ships, move it down into a dated
 section above and rewrite to past tense. If it stops being a good idea,
 delete it — don't let this list ossify into a wishlist museum.
 
-### Daily-summary push (cascade B → C → D → E)
+### Reranker tuning + optional cross-encoder
 
-**Gap:** User wants a daily Telegram message summarizing yesterday's
-notes, what was learned, practice questions for class material, and
-open questions. Phase A (Telegram transport) shipped 2026-06-04; the
-remaining phases follow in order because each enables the next.
+**Gap:** The Phase C reranker weights (semantic 0.70 / recency 0.15 /
+lexical 0.15, 30-day half-life) are hand-picked defaults. There's no way
+to tune them per-vault, and no learned reranker for users who'd trade
+footprint for quality.
 
-**Sketch (multi-phase):**
+**Sketch:**
+- Expose the weights via env / `config/vault.yaml` so a user whose notes
+  are mostly timeless can drop the recency weight.
+- Optional `bge-reranker-base` (~280 MB) behind the same `rerank()`
+  signature, loaded as a third llama-server slot, selected by a config
+  flag. Default stays heuristic (zero footprint).
 
-- **Phase B — temporal awareness.** Subsumed by the wiki schema:
-  `.hermes-agents.md` declares "daily notes live at `journal/YYYY-MM-DD.md`"
-  and the LLM reads it at session start. The system prompt also injects
-  `Today is YYYY-MM-DD (Weekday)`. A cheap query-time parser
-  (`yesterday`, `last week`, explicit dates) still adds a `where
-  source_path LIKE '%YYYY-MM-DD%'` filter. Enables Phase D's
-  "yesterday's activity" section to actually find yesterday.
-
-- **Phase C — metadata-rich schema (the migration).** Add `mtime`,
-  `heading_trail`, `tags` columns to LanceDB. Switch vector metric to
-  `cosine` (nomic embeddings are L2-normalized; current default L2 is
-  measurably worse). Top-20 → reranker → top-5 — either local cross-
-  encoder (`bge-reranker-base` ~280 MB) or heuristic combining vector
-  score + mtime decay + heading-trail term match. Doctor adds a
-  schema-version check; `hermes index --migrate` runs the
-  `--backfill --force` for users on the old schema.
-
-- **Phase D — `hermes digest` + scheduled delivery.** New
-  `src/digest.py` and `hermes digest [--date YYYY-MM-DD] [--dry-run]
-  [--no-push]`. Walks vault for files with `mtime` in window. Builds
-  sections: yesterday's activity, learnings (conceptual extracts),
-  practice questions (gated on class-tag/path detection), open
-  questions (TODOs and `?` lines surfaced from yesterday). **Writes a
-  durable wiki page at `wiki/digests/YYYY-MM-DD.md`** (so digests
-  compound over time, browseable in Obsidian's graph view) AND sends a
-  short headline via `notify.send` + the full markdown via
-  `notify.send_document`. New `com.hermes.metal.digest.plist`
-  LaunchAgent with `StartCalendarInterval`; `make
-  install-digest-daemon` target. Idempotency state from the wiki page
-  itself (page exists for date → don't double-send unless `--force`).
-
-- **Phase E — cross-session conversation memory.** Made trivial by the
-  wiki layer: REPL conversations marked with `/file <topic>` already
-  become wiki pages. For unmarked conversations, optionally append the
-  full transcript to `wiki/log.md` on REPL exit (gated on minimum
-  length). Phase D's digest can then cite REPL chats the same way it
-  cites notes. No separate LanceDB table needed — the wiki IS the
-  conversation memory.
-
-**Risk:**
-- Phase B misparses produce overconfident wrong answers; cap to high-
-  precision phrases and fall through to vector search otherwise.
-- Phase C requires `--backfill --force` for existing users. Migration
-  story is the load-bearing piece — get it wrong and users either
-  silently run on old schema or have to wait through a full reindex
-  with no warning.
-- Phase D's privacy posture: pushing summarized vault contents to
-  Telegram daily is a real choice. Default-off; requires explicit
-  config; doctor warns when push is configured ("this will send
-  vault summaries to Telegram daily").
-- Phase E's conversation table grows monotonically; needs `hermes
-  index --gc-chats --older-than 90d` from day one or it'll metastasize.
-
-**Time-to-first-shipped if linear:** 3–4 weeks of careful work. A
-crude "summary v0" path right after Phase B (mtime-walk + existing
-chunker, no schema changes) ships sooner; quality iterates afterward
-through C.
+**Risk:** Low. The heuristic is the safe default; tuning is additive and
+the cross-encoder is opt-in. Only worth the model download if users
+report the heuristic missing obvious matches.
 
 ### Watcher observability (`hermes status --watch`)
 

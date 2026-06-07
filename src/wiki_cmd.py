@@ -43,10 +43,12 @@ def _cmd_status(_args: argparse.Namespace) -> int:
     sources = list(paths.sources_dir.glob("*.md")) if paths.sources_dir.is_dir() else []
     topics = list(paths.topics_dir.glob("*.md")) if paths.topics_dir.is_dir() else []
     digests = list(paths.digests_dir.glob("*.md")) if paths.digests_dir.is_dir() else []
+    convos = list(paths.conversations_dir.glob("*.md")) if paths.conversations_dir.is_dir() else []
     print(f"hermes wiki: {paths.root}")
-    print(f"  sources:  {len(sources)}")
-    print(f"  topics:   {len(topics)}")
-    print(f"  digests:  {len(digests)}")
+    print(f"  sources:        {len(sources)}")
+    print(f"  topics:         {len(topics)}")
+    print(f"  digests:        {len(digests)}")
+    print(f"  conversations:  {len(convos)}")
     if paths.log.is_file():
         # Last log line that starts with "## ["
         log_text = paths.log.read_text(encoding="utf-8")

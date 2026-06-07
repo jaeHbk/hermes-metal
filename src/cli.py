@@ -45,6 +45,18 @@ if len(sys.argv) >= 2 and sys.argv[1] == "lint":
     from src import lint_cmd as _lint_cmd
     sys.exit(_lint_cmd.run(sys.argv[2:]))
 
+# `hermes digest` is the scheduled daily-summary entry point (also the
+# LaunchAgent's ProgramArguments target). Early-route: it talks to the chat
+# server and Telegram but needs neither lancedb nor the embed server, and a
+# ^C during a long synthesis should exit cleanly rather than traceback.
+if len(sys.argv) >= 2 and sys.argv[1] == "digest":
+    from src import digest as _digest
+    try:
+        sys.exit(_digest.run(sys.argv[2:]))
+    except KeyboardInterrupt:
+        print("\nhermes digest: interrupted.", file=sys.stderr)
+        sys.exit(130)
+
 
 import asyncio
 import json
@@ -62,6 +74,10 @@ from src.server.client import HermesClient, HermesError
 DEFAULT_K = 5
 DEFAULT_MAX_CONTEXT_CHARS = 8000
 DEFAULT_MAX_TOKENS = 512
+# Vector search casts a wider net (top-N) so the reranker has candidates to
+# reorder before we trim to top-k. 4× is enough headroom without bloating the
+# rerank pass on a small index.
+RERANK_FETCH_MULTIPLIER = 4
 
 SYSTEM_PROMPT = (
     "You are hermes-metal, the user's local 'second brain'. Answer using ONLY "
@@ -110,6 +126,17 @@ def _print_hits_summary(hits: list[dict[str, Any]], stream=sys.stderr) -> None:
 
 
 def _retrieve(query: str, *, k: int) -> list[dict[str, Any]]:
+    """Embed → (optional date filter) → vector top-N → rerank → top-k.
+
+    Phase B (temporal): a high-precision date phrase in ``query`` scopes the
+    vector search to an mtime/path window. Phase C (rerank): we over-fetch
+    candidates and reorder by the heuristic reranker (semantic + recency +
+    lexical) before trimming to ``k``. Both degrade gracefully — an
+    un-migrated index simply has no mtime to filter/score on.
+    """
+    import time as _time
+    from src.backend import temporal, reranker
+
     db_path = _resolve_db_path()
     if not db_path.exists():
         raise SystemExit(
@@ -121,7 +148,25 @@ def _retrieve(query: str, *, k: int) -> list[dict[str, Any]]:
     if vault.count() == 0:
         return []
     qvec = embed_query([query], embed_url=_resolve_embed_url(), task="search_query")[0]
-    return vault.search(qvec, k=k)
+
+    # Temporal scoping only when the index actually has mtime to filter on.
+    where = None
+    window = temporal.parse_window(query) if vault.has_metadata else None
+    if window is not None:
+        where = window.where_clause()
+        print(f"  ↳ scoped to {window.phrase}", file=sys.stderr)
+
+    fetch_k = k * RERANK_FETCH_MULTIPLIER if vault.has_metadata else k
+    hits = vault.search(qvec, k=fetch_k, filter=where)
+    # If a temporal filter eliminated everything, fall back to an unfiltered
+    # search rather than answering "nothing found" — the date scope is a
+    # best-effort precision aid, not a hard constraint the user asked for.
+    if window is not None and not hits:
+        print(f"  ↳ no notes in {window.phrase}; widening to all notes", file=sys.stderr)
+        hits = vault.search(qvec, k=fetch_k)
+    if not vault.has_metadata:
+        return hits[:k]
+    return reranker.rerank(query, hits, k=k, now=_time.time(), metric="cosine")
 
 
 async def _ask_async(question: str, *, k: int, max_tokens: int, no_rag: bool) -> int:
@@ -327,6 +372,15 @@ def _build_parser() -> argparse.ArgumentParser:
         add_help=False,
     )
 
+    # Intercepted at the top of the module (see the `digest` early-route).
+    # Help-only stub; real flags live in src/digest.py.
+    sub.add_parser(
+        "digest",
+        help="Build a daily digest of vault activity and file it in the wiki. "
+             "(See `hermes digest --help`.)",
+        add_help=False,
+    )
+
     ingest = sub.add_parser(
         "ingest",
         help="Summarize a raw source into a wiki page (writes wiki/sources/<stem>.md).",
@@ -350,8 +404,14 @@ def _build_parser() -> argparse.ArgumentParser:
                        help="With --backfill: re-embed every file regardless of state.")
     index.add_argument("--gc", action="store_true",
                        help="Remove index rows whose source file is gone or now excluded.")
+    index.add_argument("--migrate", action="store_true",
+                       help="Upgrade an old index to the metadata-rich schema (re-indexes stale rows).")
+    index.add_argument("--gc-chats", action="store_true",
+                       help="Prune archived REPL conversations older than --older-than days.")
+    index.add_argument("--older-than", type=int, default=None, metavar="DAYS",
+                       help="With --gc-chats: age threshold in days (default 90).")
     index.add_argument("--dry-run", action="store_true",
-                       help="With --gc: show what would be removed without removing.")
+                       help="With --gc / --gc-chats: show what would be removed without removing.")
     index.add_argument("--limit", type=int, default=None,
                        help="Process at most N files.")
     index.set_defaults(func=_cmd_index)
@@ -389,6 +449,12 @@ def _cmd_index(args: argparse.Namespace) -> int:
         flags.append("--force")
     if args.gc:
         flags.append("--gc")
+    if args.migrate:
+        flags.append("--migrate")
+    if args.gc_chats:
+        flags.append("--gc-chats")
+    if args.older_than is not None:
+        flags.extend(["--older-than", str(args.older_than)])
     if args.dry_run:
         flags.append("--dry-run")
     if args.limit is not None:

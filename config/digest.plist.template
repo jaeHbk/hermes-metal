@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hermes.metal.digest</string>
+
+    <!--
+        One-shot daily job, not a persistent daemon: run `hermes digest`,
+        which summarizes YESTERDAY's notes, files the wiki page, and (only if
+        HERMES_DIGEST_PUSH=1 and a bot is configured) pushes to Telegram.
+        Routed through the venv python so lancedb/httpx are importable.
+    -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>{WORKING_DIR}/.venv/bin/python</string>
+        <string>-m</string>
+        <string>src.cli</string>
+        <string>digest</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{WORKING_DIR}</string>
+
+    <!--
+        StartCalendarInterval fires once daily at {DIGEST_HOUR}:{DIGEST_MINUTE}
+        local time. If the Mac is asleep at that moment, launchd runs the job
+        at the next wake — and `hermes digest` is idempotent (the wiki page is
+        the state), so a late/duplicate fire is a no-op.
+    -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>{DIGEST_HOUR}</integer>
+        <key>Minute</key>
+        <integer>{DIGEST_MINUTE}</integer>
+    </dict>
+
+    <!-- Not KeepAlive: this is a scheduled one-shot, it should exit and stay exited. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>Nice</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>{WORKING_DIR}/logs/digest.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{WORKING_DIR}/logs/digest.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+        <key>PYTHONPATH</key>
+        <string>{WORKING_DIR}</string>
+        <key>HERMES_VAULT_PATH</key>
+        <string>{VAULT_PATH}</string>
+        <key>HERMES_LANCEDB_PATH</key>
+        <string>{WORKING_DIR}/storage/lancedb</string>
+        <key>HERMES_CHAT_URL</key>
+        <string>http://127.0.0.1:{ENGINE_PORT}</string>
+        <key>HERMES_EMBED_URL</key>
+        <string>http://127.0.0.1:{EMBED_PORT}/v1/embeddings</string>
+        <!--
+            Privacy gate: push is OFF by default. To push digests to Telegram,
+            set this to 1 here (and run `hermes notify --setup`). `hermes
+            doctor` warns when this is on so the choice stays visible.
+        -->
+        <key>HERMES_DIGEST_PUSH</key>
+        <string>{DIGEST_PUSH}</string>
+    </dict>
+</dict>
+</plist>

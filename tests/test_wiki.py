@@ -195,6 +195,26 @@ def test_update_index_keeps_alphabetical_order(vault):
     assert 0 < a_idx < m_idx < z_idx
 
 
+def test_update_index_does_not_accumulate_blank_lines(vault):
+    """Repeated index writes must not grow blank lines without bound.
+
+    Regression: `_join_index` used to re-capture the blank line it left
+    between a header and its body on every write, so index.md's whitespace
+    grew by one line per `update_index_row` — a real problem on an always-on
+    system writing daily digests and per-session conversation archives.
+    """
+    import re
+    init_wiki()
+    paths = get_paths()
+    for i in range(15):
+        update_index_row(paths, "Topics", "t0", f"rewrite {i}")
+    text = paths.index.read_text()
+    max_run = max((m.group(0).count("\n") for m in re.finditer(r"\n\n+", text)), default=0)
+    assert max_run <= 2, f"blank lines grew to a run of {max_run} newlines"
+    # And the row itself is still correct/singular.
+    assert text.count("[t0](topics/t0.md)") == 1
+
+
 def test_update_index_emits_missing_section(vault):
     """If the user deleted ## Topics from index.md, a Topics row must
     still land — appended at the end, not silently dropped."""
