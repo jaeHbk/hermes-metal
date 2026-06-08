@@ -461,12 +461,35 @@ def check_agents() -> Section:
         if not plist.is_file():
             s.add(Result(label, FAIL, "plist not installed", fix=f"make {target}"))
             continue
+        # A plist that `plutil` accepts but a strict (launchd-grade) parser
+        # rejects — most often a literal "--" inside an XML comment — makes the
+        # agent die with exit 78 on every spawn, silently. Catch that here.
+        xml_ok, xml_err = _strict_plist_ok(plist)
+        if not xml_ok:
+            s.add(Result(
+                label, FAIL,
+                f"plist is not strictly-valid XML: {xml_err}",
+                fix=f"make {target}   # re-render; a '--' inside an XML comment is the usual cause.",
+            ))
+            continue
         if have_print:
+            # Per-agent `launchctl print` exposes the last exit code; exit 78
+            # (EX_CONFIG) on a valid plist means launchd refused to spawn it
+            # (commonly a wedged service record from a prior crash-loop).
+            arc, ainfo, _ = _run(["launchctl", "print", f"gui/{uid}/{label}"], timeout=5.0)
+            exit78 = arc == 0 and re.search(r"last exit code\s*=\s*78", ainfo)
+            running = arc == 0 and re.search(r"\bstate\s*=\s*running\b", ainfo)
             # Anchor on word boundaries so `com.hermes.metal.engine` doesn't
-            # match the prefix of an unrelated `com.hermes.metal.engine.helper`
-            # that someone might load alongside ours.
+            # match the prefix of an unrelated `com.hermes.metal.engine.helper`.
             pattern = re.compile(r"(?<![\w.])" + re.escape(label) + r"(?![\w.])")
-            if pattern.search(listing):
+            if exit78 and not running:
+                s.add(Result(
+                    label, FAIL,
+                    "loaded but exits 78 (EX_CONFIG) on spawn — launchd is refusing to run it",
+                    fix="log out and back in (resets the user launchd domain), then `make start-daemon`. "
+                        "The plist itself is valid; this is a wedged service record.",
+                ))
+            elif pattern.search(listing):
                 s.add(Result(label, OK, f"loaded in gui/{uid}"))
             else:
                 s.add(Result(
@@ -479,6 +502,21 @@ def check_agents() -> Section:
             # back to a plain "file exists" check.
             s.add(Result(label, OK, "plist on disk (launchctl print unavailable)"))
     return s
+
+
+def _strict_plist_ok(path: Path) -> tuple[bool, str]:
+    """Strictly parse a plist the way launchd does (rejects '--' in comments).
+
+    Returns (ok, error_message). Uses plistlib (expat under the hood), which is
+    stricter than `plutil -lint`. Stdlib-only, like the rest of doctor.
+    """
+    import plistlib
+    try:
+        with path.open("rb") as fh:
+            plistlib.load(fh)
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 — any parse failure is a real problem
+        return False, str(exc)
 
 
 def check_servers() -> Section:

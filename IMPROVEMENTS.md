@@ -8,6 +8,55 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-07 — LaunchAgent exit-78 hardening (invalid-plist guard + diagnosis)
+
+**Problem:** All three LaunchAgents reported `last exit code = 78` (EX_CONFIG)
+and never served traffic, while `llama-server` ran fine when launched by hand.
+A systematic isolation (run binary manually OK, under launchd's scrubbed env
+OK, full config under a *different* label OK, byte-identical file with only the
+Label changed OK — but the real `com.hermes.metal.*` labels FAIL) found two
+distinct issues:
+
+1. **A real, latent plist bug:** `daemon.plist.template` and
+   `digest.plist.template` had XML comments containing a literal double hyphen
+   (from `--flash-attn`, `--prompt-cache`, `--setup`). A double hyphen inside
+   an XML comment is illegal per the spec; `plutil -lint` is lenient and
+   passes it, but a strict (launchd-grade) parser rejects the whole plist →
+   exit 78, silently, with the program never exec'd. This would bite real
+   users on stricter macOS builds.
+2. **A wedged launchd service record** (the symptom on this machine): once an
+   agent has crash-looped, its record in the user's `gui/<uid>` domain can get
+   stuck returning 78 regardless of plist content — proven because a
+   byte-identical file under a fresh label launches instantly. It clears only
+   on logout/reboot (which resets the user launchd domain); `bootout`,
+   `disable`/`enable`, and re-`bootstrap` do not.
+
+**Change:**
+
+* **Templates:** reworded the offending comments so no double hyphen appears
+  inside any comment (flag names spelled out / single-dashed). All four
+  templates now render to strictly-valid XML.
+* **Makefile `_bootstrap`:** added a strict `plistlib` (expat) parse after
+  `plutil -lint` — catches the bad-comment class at install time instead of
+  after a thousand silent crash-loops — plus a post-bootstrap exit-78 check
+  that prints the logout/reboot remediation when a valid plist still won't
+  spawn.
+* **`hermes doctor`:** `check_agents` now strict-parses each installed plist
+  and reads each agent's per-label exit code, so a crash-looping agent shows
+  `FAIL … exits 78 (EX_CONFIG)` with the right fix instead of a misleading
+  "loaded = OK". New stdlib helper `_strict_plist_ok`.
+
+**Files:** `config/daemon.plist.template`, `config/digest.plist.template`,
+`Makefile` (`_bootstrap`), `src/doctor.py` (`check_agents`,
+`_strict_plist_ok`), `tests/test_doctor_plist.py` (new).
+
+**Impact:** The invalid-XML bug can no longer ship undetected (install-time
+guard + 4 regression tests covering every template). When a launchd record is
+genuinely wedged, both `make` and `doctor` now name the cause and the fix
+(log out / reboot) instead of leaving the user to guess. Tests: 206 → 210.
+
+---
+
 ## 2026-06-07 — Daily-summary cascade: temporal retrieval, metadata schema + rerank, digest, conversation memory (Phases B→C→D→E)
 
 **Problem:** The wiki layer made synthesis *durable*, but retrieval was still

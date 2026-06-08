@@ -423,6 +423,15 @@ _bootstrap:
 			(echo "ERROR: $(PLIST) failed plutil -lint" && exit 1); \
 		echo "    plutil:      lint OK"; \
 	fi
+	@# plutil -lint is lenient: it accepts a literal "--" inside an XML comment,
+	@# but launchd's stricter parser rejects such a plist and the agent dies
+	@# with exit 78 (EX_CONFIG) on every spawn — silently, since the program
+	@# never runs. Validate with Python's expat (launchd-grade strictness) so
+	@# this class of bug is caught at install time, not after 1000 crash-loops.
+	@/usr/bin/env python3 -c "import plistlib,sys; plistlib.load(open(sys.argv[1],'rb'))" "$(PLIST)" \
+		|| (echo "ERROR: $(PLIST) is not strictly-valid XML (launchd will reject it with exit 78)." \
+		    && echo "       Common cause: a literal '--' inside an XML comment. Reword the comment." && exit 1)
+	@echo "    strict xml:  OK"
 	@launchctl bootout "$(TARGET)" 2>/dev/null || true
 	@if launchctl bootstrap "$(GUI_DOMAIN)" "$(PLIST)" 2>/dev/null; then \
 		echo "    launchctl:   bootstrapped $(TARGET)"; \
@@ -431,6 +440,17 @@ _bootstrap:
 		launchctl unload "$(PLIST)" 2>/dev/null || true; \
 		launchctl load -w "$(PLIST)"; \
 		echo "    launchctl:   loaded (legacy)"; \
+	fi
+	@# Verify the agent didn't immediately die. A non-zero "last exit code"
+	@# right after bootstrap means the spawn failed (bad args, exit 78, etc.);
+	@# surface it now instead of letting the user discover a dead daemon later.
+	@sleep 3; \
+	rc=$$(launchctl print "$(TARGET)" 2>/dev/null | sed -n 's/.*last exit code = \([0-9][0-9]*\).*/\1/p'); \
+	if [ "$$rc" = "78" ]; then \
+		echo "    WARNING: $(TARGET) exited 78 (EX_CONFIG) right after launch."; \
+		echo "             The plist is valid, so this is usually a wedged launchd"; \
+		echo "             service record from a prior crash-loop. Fix: log out and"; \
+		echo "             back in (resets the user launchd domain), then 'make start-daemon'."; \
 	fi
 
 # ----- install-cli / uninstall-cli ------------------------------------------
