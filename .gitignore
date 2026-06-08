@@ -8,3 +8,4 @@ logs/
 third_party/llama.cpp/build/
 config/host_topology.env
 .env
+tmp/

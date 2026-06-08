@@ -71,8 +71,11 @@
         <string>http://127.0.0.1:{EMBED_PORT}/v1/embeddings</string>
         <!--
             Privacy gate: push is OFF by default. To push digests to Telegram,
-            set this to 1 here (and run `hermes notify --setup`). `hermes
-            doctor` warns when this is on so the choice stays visible.
+            set this to 1 here (and run the `hermes notify` setup flow). The
+            `hermes doctor` Digest section warns when this is on so the choice
+            stays visible. (Flag names are kept dash-free in this comment: a
+            literal double hyphen inside an XML comment is illegal and makes
+            launchd reject the plist with exit 78.)
         -->
         <key>HERMES_DIGEST_PUSH</key>
         <string>{DIGEST_PUSH}</string>

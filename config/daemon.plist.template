@@ -30,8 +30,12 @@
         <string>{THREAD_COUNT}</string>
         <!--
             Flash attention on Metal is a runtime flag, not a CMake build flag.
-            llama-server defines `-fa, --flash-attn [on|off|auto]` (default auto);
-            pass `on` explicitly for daemon determinism.
+            llama-server defines the -fa / flash-attn option (on|off|auto,
+            default auto); pass `on` explicitly for daemon determinism.
+            NOTE: XML comments must not contain a literal double-hyphen — it is
+            illegal per the XML spec and launchd rejects the plist with exit 78
+            (EX_CONFIG), even though `plutil -lint` tolerates it. Keep flag
+            names in comments single-dashed or spelled out.
         -->
         <string>-fa</string>
         <string>on</string>
@@ -44,11 +48,15 @@
         <string>-ctv</string>
         <string>{CACHE_TYPE_V}</string>
         <!--
-            CLAUDE.md §2 specifies persistent prompt states. `--prompt-cache <file>`
-            is a llama-cli flag (LLAMA_EXAMPLE_COMPLETION) and is NOT registered for
-            llama-server; passing it would crash arg parsing and trigger a restart loop.
-            llama-server's equivalent persistence is per-slot KV save/restore via
-            --slot-save-path PATH plus POST /slots/{id}?action=save|restore endpoints.
+            CLAUDE.md §2 specifies persistent prompt states. The prompt-cache
+            flag is a llama-cli option (LLAMA_EXAMPLE_COMPLETION) and is NOT
+            registered for llama-server; passing it would crash arg parsing and
+            trigger a restart loop. llama-server's equivalent persistence is
+            per-slot KV save/restore via the slot-save-path option plus POST
+            /slots/{id}?action=save|restore endpoints.
+            (Flag names are single-dashed here on purpose: a literal double
+            hyphen inside an XML comment is illegal and makes launchd reject
+            the plist with exit 78.)
         -->
         <string>--slot-save-path</string>
         <string>{WORKING_DIR}/{SLOT_SAVE_PATH}</string>
