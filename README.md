@@ -1,4 +1,4 @@
-<img width="2388" height="1792" alt="Gemini_Generated_Image_vv8jqpvv8jqpvv8j" src="https://github.com/user-attachments/assets/06e0bbdf-c7a5-4747-9bfd-768c34ddb90c" />
+<img width="577" height="433" alt="Gemini_Generated_Image_vv8jqpvv8jqpvv8j-removebg-preview" src="https://github.com/user-attachments/assets/7cbe30b5-06ba-46ba-b526-94cb2db820ad" />
 
 # hermes-metal
 
