@@ -1,3 +1,5 @@
+<img width="2388" height="1792" alt="Gemini_Generated_Image_vv8jqpvv8jqpvv8j" src="https://github.com/user-attachments/assets/06e0bbdf-c7a5-4747-9bfd-768c34ddb90c" />
+
 # hermes-metal
 
 A zero-lag, background "second brain" for Apple Silicon. It watches a Markdown
