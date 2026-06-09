@@ -1,4 +1,4 @@
-<img width="577" height="433" alt="Gemini_Generated_Image_vv8jqpvv8jqpvv8j-removebg-preview" src="https://github.com/user-attachments/assets/7cbe30b5-06ba-46ba-b526-94cb2db820ad" />
+<img width="2388" height="1792" alt="Adobe Express - file" src="https://github.com/user-attachments/assets/4f12195d-3517-4738-87b5-e46a552c9811" />
 
 # hermes-metal
 
