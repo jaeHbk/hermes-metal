@@ -209,3 +209,23 @@ def test_extract_summary_falls_back_when_section_missing():
     body = "Something else entirely.\n"
     out = ingest_cmd._extract_summary(body)
     assert "Something else" in out
+
+
+def test_ingest_text_truncates_long_body_once(vault, fake_chat, monkeypatch):
+    """A source over the cap is truncated exactly once, with a single marker.
+    Guards against re-introducing a second truncation pass."""
+    import src.ingest_cmd as ic
+    captured = {}
+
+    def _capture_chat(self, messages, **_kw):
+        captured["user"] = messages[1]["content"]
+        return ("## Summary\nS.\n\n## Key claims\n- c\n\n"
+                "## Entities and concepts\n- [[E]]: x.\n\n## Open questions\n- q\n")
+    monkeypatch.setattr("src.server.client.HermesClient.chat_sync", _capture_chat)
+
+    wiki.init_wiki()
+    big = "x" * 50_000
+    res = ic.ingest_text(big, page_name="big", source_label="big-src")
+    assert res.status == ic.WROTE
+    # Exactly one truncation marker in the prompt sent to the chat server.
+    assert captured["user"].count("[truncated for length]") == 1

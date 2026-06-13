@@ -29,11 +29,17 @@ WROTE = "WROTE"
 ALREADY_EXISTS = "ALREADY_EXISTS"
 REFUSED_HANDWRITTEN = "REFUSED_HANDWRITTEN"
 
+# Cap source text fed to the chat server so a huge file/page can't blow the
+# context window. ingest_text is the single owner of this truncation (file,
+# URL, and batch all flow through it).
+MAX_SOURCE_CHARS = 32_000
+_TRUNCATION_MARKER = "\n\n[truncated for length]"
+
 
 @dataclass
 class IngestResult:
     status: str               # WROTE | ALREADY_EXISTS | REFUSED_HANDWRITTEN
-    page_path: Path | None
+    page_path: Path
     summary: str
 
 
@@ -72,9 +78,9 @@ Rules:
 """
 
 
-def _build_user_prompt(source_path, body: str) -> str:
+def _build_user_prompt(source_label: str, body: str) -> str:
     return (
-        f"Source path: {source_path}\n\n"
+        f"Source path: {source_label}\n\n"
         f"--- BEGIN SOURCE ---\n{body}\n--- END SOURCE ---\n\n"
         "Produce the wiki summary now."
     )
@@ -83,15 +89,11 @@ def _build_user_prompt(source_path, body: str) -> str:
 # ----------------------------------------------------------------- helpers
 
 
-def _read_source(path: Path, *, max_chars: int = 32_000) -> str:
-    """Read a source file. Truncates to ``max_chars`` to fit the chat
-    server's context, with a note in the prompt so the model can warn
-    if it sees the cut.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[truncated for length]"
-    return text
+def _read_source(path: Path) -> str:
+    """Read a source file as text. Truncation to the chat-server context cap
+    is handled centrally in ``ingest_text`` (so URL/batch ingestion, which
+    don't read files, get the same cap)."""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _slugify(name: str) -> str:
@@ -175,8 +177,8 @@ def ingest_text(
     if page_path.exists() and not force:
         return IngestResult(ALREADY_EXISTS, page_path, "")
 
-    if len(body) > 32_000:
-        body = body[:32_000] + "\n\n[truncated for length]"
+    if len(body) > MAX_SOURCE_CHARS:
+        body = body[:MAX_SOURCE_CHARS] + _TRUNCATION_MARKER
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
