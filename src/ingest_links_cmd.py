@@ -111,6 +111,13 @@ def run(argv: list[str] | None = None) -> int:
             print(f"{prefix} FAIL {url}  (chat: {exc})", file=sys.stderr)
             failures.append((url, f"chat: {exc}"))
             continue
+        except (OSError, ValueError) as exc:
+            # ingest_text rolls back the page then re-raises write/index errors.
+            # Treat them as per-URL failures so one bad write doesn't abort the
+            # whole batch (skip-and-continue is the module's contract).
+            print(f"{prefix} FAIL {url}  (write: {exc})", file=sys.stderr)
+            failures.append((url, f"write: {exc}"))
+            continue
 
         if res.status == ingest_cmd.REFUSED_HANDWRITTEN:
             print(f"{prefix} FAIL {url}  (hand-written file at {res.page_path.name})",
@@ -127,7 +134,7 @@ def run(argv: list[str] | None = None) -> int:
     # Auto-index new pages unless suppressed.
     if wrote_any and not args.no_index:
         print(f"hermes ingest-links: indexing {ok} new page(s)...", file=sys.stderr)
-        from src import index_cmd
+        from src import index_cmd  # lazy: pulls in the LanceDB/embedding stack
         index_cmd.run(["--backfill"])
 
     print(f"Done: {ok} ingested, {skipped} already present, {len(failures)} failed.",

@@ -153,3 +153,66 @@ def test_batch_uninitialized_wiki_fails_before_fetch(vault, monkeypatch):
 def test_batch_missing_file_returns_2(vault):
     rc = ingest_links_cmd.run([str(vault / "nope.txt")])
     assert rc == 2
+
+
+def test_batch_chat_failure_skips_and_continues(vault, no_index, monkeypatch):
+    from src.server.client import HermesError
+    wiki.init_wiki()
+    bad = "https://a.example/bad"
+    good = "https://b.example/good"
+    mapping = {
+        bad: web.Article(url=bad, title="bad", text="body " * 50),
+        good: web.Article(url=good, title="good", text="body " * 50),
+    }
+    monkeypatch.setattr("src.web.fetch_article", _fake_fetch(mapping))
+
+    calls = {"n": 0}
+    def _chat(self, messages, **_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise HermesError("server is down")
+        return ("## Summary\nS.\n\n## Key claims\n- c\n\n"
+                "## Entities and concepts\n- [[E]]: x.\n\n## Open questions\n- q\n")
+    monkeypatch.setattr("src.server.client.HermesClient.chat_sync", _chat)
+
+    f = _links_file(vault, [bad, good])
+    rc = ingest_links_cmd.run([str(f)])
+    assert rc == 1
+    # The good URL after the failure was still ingested.
+    idx = wiki.get_paths().index.read_text()
+    assert "[good](sources/good.md)" in idx
+    # The failed URL is recorded for retry.
+    failed = f.with_suffix(".failed.txt")
+    assert bad in failed.read_text()
+    assert good not in failed.read_text()
+
+
+def test_batch_write_failure_skips_and_continues(vault, fake_chat, no_index, monkeypatch):
+    wiki.init_wiki()
+    bad = "https://a.example/bad"
+    good = "https://b.example/good"
+    mapping = {
+        bad: web.Article(url=bad, title="bad", text="body " * 50),
+        good: web.Article(url=good, title="good", text="body " * 50),
+    }
+    monkeypatch.setattr("src.web.fetch_article", _fake_fetch(mapping))
+
+    # Make the FIRST ingest_text raise an OSError (simulating a write failure
+    # that ingest_text re-raises after rollback); the second succeeds.
+    real_ingest = ingest_cmd.ingest_text
+    calls = {"n": 0}
+    def _flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("simulated disk failure")
+        return real_ingest(*a, **k)
+    monkeypatch.setattr("src.ingest_cmd.ingest_text", _flaky)
+
+    f = _links_file(vault, [bad, good])
+    rc = ingest_links_cmd.run([str(f)])
+    assert rc == 1
+    # The batch did NOT abort: the second URL was still processed and written.
+    idx = wiki.get_paths().index.read_text()
+    assert "[good](sources/good.md)" in idx
+    failed = f.with_suffix(".failed.txt")
+    assert bad in failed.read_text()
