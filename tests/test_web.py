@@ -15,6 +15,7 @@ from src import web
 _ARTICLE_HTML = """
 <!DOCTYPE html>
 <html><head><title>Attention Explained</title>
+<meta name="author" content="Jane Roe">
 <meta property="article:published_time" content="2024-11-02"></head>
 <body>
 <nav>home about contact</nav>
@@ -49,6 +50,9 @@ def test_fetch_article_extracts_body_and_title():
     # Boilerplate stripped.
     assert "home about contact" not in art.text.lower()
     assert "copyright" not in art.text.lower()
+    # Metadata extracted from the page head.
+    assert art.author == "Jane Roe"
+    assert art.date == "2024-11-02"
 
 
 def test_fetch_article_http_error_raises_weberror():
@@ -97,3 +101,18 @@ def test_fetch_article_titleless_keeps_empty_title():
     art = web.fetch_article("https://notitle.example/page", _client=_client(responder))
     assert art.title == ""
     assert "plain prose" in art.text.lower()
+
+
+def test_fetch_article_follows_redirect():
+    """follow_redirects must be honored: a 301 to the canonical URL is
+    followed and the final page is extracted (many article URLs redirect)."""
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/old":
+            return httpx.Response(301, headers={"Location": "https://blog.example/new"})
+        return httpx.Response(200, html=_ARTICLE_HTML)
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(responder), follow_redirects=True
+    )
+    art = web.fetch_article("https://blog.example/old", _client=client)
+    assert art.title == "Attention Explained"

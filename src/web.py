@@ -64,7 +64,9 @@ def fetch_article(
         try:
             resp = client.get(url)
         except httpx.TimeoutException as exc:
-            raise WebError(f"timeout after {timeout:g}s fetching {url}") from exc
+            # Don't quote `timeout` in the message: on an injected client the
+            # effective timeout is the caller's, not this arg.
+            raise WebError(f"timeout fetching {url}") from exc
         except httpx.HTTPError as exc:
             raise WebError(f"fetch error for {url}: {exc}") from exc
 
