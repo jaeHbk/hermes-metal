@@ -33,7 +33,7 @@ requirements.
 
 **Impact:** A reading list of links becomes a set of cross-linked wiki source
 pages in one command, retrievable on the next query. Provenance (`source-url`)
-is preserved in frontmatter. Tests: 210 → 231.
+is preserved in frontmatter. Tests: 210 → 233.
 
 ## 2026-06-07 — LaunchAgent exit-78 hardening (invalid-plist guard + diagnosis)
 
