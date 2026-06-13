@@ -63,7 +63,8 @@ remove agents with `make uninstall`.
 | `hermes search "<q>"` | Retrieval only; prints matched chunks + scores. |
 | `hermes digest` | Build a daily activity digest; file it in the wiki, optionally push it. |
 | `hermes wiki init` / `status` | Bootstrap / inspect the LLM-authored wiki. |
-| `hermes ingest <path>` | Summarize a raw source into `wiki/sources/`. |
+| `hermes ingest <path>` / `--url <url>` | Summarize a local file or a fetched web page into `wiki/sources/`. |
+| `hermes ingest-links <file>` | Fetch + summarize every URL in a text file; skips failures, auto-indexes. |
 | `hermes lint` | Wiki health-check: orphans, stubs, stale, unused sources. |
 | `hermes index` | Backfill / GC / migrate the index (see below). |
 | `hermes notify` | Send a Telegram message; `--setup` configures, `--check` validates. |
@@ -123,6 +124,9 @@ synthesis becomes retrievable the moment it's written.
 ```sh
 hermes wiki init                 # idempotent bootstrap
 hermes ingest path/to/article.md # summarize a source → wiki/sources/<stem>.md
+hermes ingest --url https://example.com/article  # summarize a fetched web page
+hermes ingest-links ~/reading.txt                # a whole reading list (one URL/line; # comments ok)
+                                                 # failures are skipped → ~/reading.failed.txt for a retry run
 hermes lint                      # health report (read-only; --strict for CI)
 ```
 
