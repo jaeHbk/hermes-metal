@@ -499,6 +499,7 @@ def _ingest_one_url(url: str, *, name: str | None, force: bool, max_tokens: int)
         )
     except HermesError as exc:
         print(f"hermes ingest: chat server error: {exc}", file=sys.stderr)
+        print(f"               (try: hermes doctor)", file=sys.stderr)
         return 1
 
     if res.status == ingest_cmd.REFUSED_HANDWRITTEN:
@@ -509,7 +510,8 @@ def _ingest_one_url(url: str, *, name: str | None, force: bool, max_tokens: int)
         print(f"hermes ingest: {res.page_path.name} already exists "
               f"(use --force to re-summarize).", file=sys.stderr)
         return 0
-    print(f"hermes ingest: wrote {res.page_path.name} — {res.summary}")
+    print(f"hermes ingest: wrote {res.page_path.relative_to(paths.root.parent)}")
+    print(f"               summary: {res.summary}")
     return 0
 
 
