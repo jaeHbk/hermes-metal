@@ -22,6 +22,20 @@ from pathlib import Path
 from src import wiki
 from src.server.client import HermesClient, HermesError
 
+from dataclasses import dataclass
+
+
+WROTE = "WROTE"
+ALREADY_EXISTS = "ALREADY_EXISTS"
+REFUSED_HANDWRITTEN = "REFUSED_HANDWRITTEN"
+
+
+@dataclass
+class IngestResult:
+    status: str               # WROTE | ALREADY_EXISTS | REFUSED_HANDWRITTEN
+    page_path: Path | None
+    summary: str
+
 
 # ---------------------------------------------------------- prompt template
 
@@ -58,7 +72,7 @@ Rules:
 """
 
 
-def _build_user_prompt(source_path: Path, body: str) -> str:
+def _build_user_prompt(source_path, body: str) -> str:
     return (
         f"Source path: {source_path}\n\n"
         f"--- BEGIN SOURCE ---\n{body}\n--- END SOURCE ---\n\n"
@@ -129,6 +143,70 @@ def _extract_summary(body: str) -> str:
 # ------------------------------------------------------------------- run
 
 
+def ingest_text(
+    body: str,
+    *,
+    page_name: str,
+    source_label: str,
+    extra_frontmatter: dict[str, str] | None = None,
+    max_tokens: int = 1024,
+    force: bool = False,
+) -> IngestResult:
+    """Summarize ``body`` via the chat server and write a wiki source page.
+
+    This is the shared write-path for every ingest entry point (file, URL,
+    batch). ``page_name`` is the (already-derived) wiki page stem; it is
+    slugified here so callers don't have to. ``source_label`` is the
+    provenance string the LLM sees (a file path or a URL).
+    ``extra_frontmatter`` is merged into the page frontmatter (e.g.
+    ``{"source-url": ...}``).
+
+    Returns an :class:`IngestResult`. Raises ``HermesError`` if the chat
+    server fails, and re-raises any exception from the index/log write after
+    rolling back the page.
+    """
+    stem = _slugify(page_name)
+    paths = wiki.get_paths()
+    page_path = paths.sources_dir / f"{stem}.md"
+
+    # Hand-written-file guard MUST run regardless of --force.
+    if page_path.exists() and not wiki.is_managed(page_path):
+        return IngestResult(REFUSED_HANDWRITTEN, page_path, "")
+    if page_path.exists() and not force:
+        return IngestResult(ALREADY_EXISTS, page_path, "")
+
+    if len(body) > 32_000:
+        body = body[:32_000] + "\n\n[truncated for length]"
+
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": _build_user_prompt(source_label, body)},
+    ]
+    client = HermesClient()
+    body_out = client.chat_sync(messages, max_tokens=max_tokens, temperature=0.3)
+
+    meta = {"source-path": source_label}
+    if extra_frontmatter:
+        meta.update(extra_frontmatter)
+    page = wiki.Page(title=stem, body=body_out, frontmatter=meta)
+    summary = _extract_summary(body_out)
+
+    wiki.write_page(page_path, page)
+    try:
+        wiki.update_index_row(paths, "Sources", stem, summary)
+        wiki.append_log(
+            paths, "ingest", stem,
+            detail=f"Source: {source_label}\nWiki page: {page_path.relative_to(paths.root.parent)}",
+        )
+    except Exception:
+        try:
+            page_path.unlink()
+        except OSError:
+            pass
+        raise
+    return IngestResult(WROTE, page_path, summary)
+
+
 def run(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
         prog="hermes ingest",
@@ -154,74 +232,34 @@ def run(argv: list[str] | None = None) -> int:
         print(f"               run: hermes wiki init", file=sys.stderr)
         return 2
 
-    page_stem = _slugify(args.name or src.stem)
-    page_path = paths.sources_dir / f"{page_stem}.md"
-    # Hand-written-file guard MUST run regardless of --force. We never
-    # clobber a file the LLM didn't author, even if the user explicitly
-    # asks. They can delete it manually if they really mean it.
-    if page_path.exists() and not wiki.is_managed(page_path):
-        print(
-            f"hermes ingest: refusing to overwrite hand-written file: {page_path}",
-            file=sys.stderr,
-        )
-        return 1
-    if page_path.exists() and not args.force:
-        print(
-            f"hermes ingest: {page_path.name} already exists "
-            f"(use --force to re-summarize).",
-            file=sys.stderr,
-        )
-        return 0
-
     print(f"hermes ingest: reading {src}", file=sys.stderr)
     body_in = _read_source(src)
 
     print(f"hermes ingest: calling chat server (this may take 30-60s)...", file=sys.stderr)
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": _build_user_prompt(src, body_in)},
-    ]
-    client = HermesClient()
     try:
-        body_out = client.chat_sync(messages, max_tokens=args.max_tokens, temperature=0.3)
+        res = ingest_text(
+            body_in,
+            page_name=args.name or src.stem,
+            source_label=str(src),
+            max_tokens=args.max_tokens,
+            force=args.force,
+        )
     except HermesError as exc:
         print(f"hermes ingest: chat server error: {exc}", file=sys.stderr)
         print(f"               (try: hermes doctor)", file=sys.stderr)
         return 1
 
-    page = wiki.Page(
-        title=page_stem,
-        body=body_out,
-        frontmatter={
-            "source-path": str(src),
-            "source-stem": src.stem,
-        },
-    )
-    summary = _extract_summary(body_out)
-    # Three-step write: page, then index, then log. If any step after the
-    # first raises, the page is on disk but the index/log are out of sync.
-    # Roll the page back so the wiki stays internally consistent; the user
-    # can re-run ingest cleanly. This matters because a partial state
-    # would survive into the next run, hiding the failure (the page
-    # already exists → the early-return at line 156 returns 0).
-    wiki.write_page(page_path, page)
-    try:
-        wiki.update_index_row(paths, "Sources", page_stem, summary)
-        wiki.append_log(
-            paths, "ingest", page_stem,
-            detail=f"Source: {src}\nWiki page: {page_path.relative_to(paths.root.parent)}",
-        )
-    except Exception:
-        # Best-effort rollback; if THIS fails too, the user gets the
-        # original exception, not the rollback error.
-        try:
-            page_path.unlink()
-        except OSError:
-            pass
-        raise
+    if res.status == REFUSED_HANDWRITTEN:
+        print(f"hermes ingest: refusing to overwrite hand-written file: {res.page_path}",
+              file=sys.stderr)
+        return 1
+    if res.status == ALREADY_EXISTS:
+        print(f"hermes ingest: {res.page_path.name} already exists "
+              f"(use --force to re-summarize).", file=sys.stderr)
+        return 0
 
-    print(f"hermes ingest: wrote {page_path.relative_to(paths.root.parent)}")
-    print(f"               summary: {summary}")
+    print(f"hermes ingest: wrote {res.page_path.relative_to(paths.root.parent)}")
+    print(f"               summary: {res.summary}")
     return 0
 
 
