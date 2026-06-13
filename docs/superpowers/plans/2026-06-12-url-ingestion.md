@@ -306,10 +306,13 @@ def fetch_article(
         if _client is None:
             client.close()
 
+    # with_metadata=False: in trafilatura 2.x, with_metadata=True prepends a
+    # YAML frontmatter block (title/date) to the markdown body. We get those
+    # fields separately via extract_metadata() below, so keep the body clean.
     extracted = trafilatura.extract(
         html,
         output_format="markdown",
-        with_metadata=True,
+        with_metadata=False,
         include_comments=False,
         include_tables=True,
     )
@@ -509,8 +512,8 @@ Expected: all PASS, same as the Step 1 baseline. The refactor preserved behavior
 
 - [ ] **Step 5: Run the full suite to catch any import fallout**
 
-Run: `.venv/bin/python -m pytest -q`
-Expected: all PASS (210 + the 6 new web tests = 216).
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all PASS (210 baseline + 7 new web tests = 217). NOTE: always scope to `tests/` — bare `pytest` recurses into `third_party/llama.cpp` and errors at collection on unrelated vendored tests.
 
 - [ ] **Step 6: Commit**
 
@@ -741,7 +744,7 @@ Expected: usage text showing `file`, `--force`, `--max-tokens`, `--no-index`.
 
 - [ ] **Step 5: Run the full suite (nothing should break)**
 
-Run: `.venv/bin/python -m pytest -q`
+Run: `.venv/bin/python -m pytest tests/ -q`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
@@ -1083,8 +1086,8 @@ Expected: all 7 PASS.
 
 - [ ] **Step 5: Run the full suite**
 
-Run: `.venv/bin/python -m pytest -q`
-Expected: all PASS (216 + 7 = 223).
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all PASS (220 + 7 = 227).
 
 - [ ] **Step 6: Commit**
 
@@ -1244,7 +1247,7 @@ requirements.
 
 **Impact:** A reading list of links becomes a set of cross-linked wiki source
 pages in one command, retrievable on the next query. Provenance (`source-url`)
-is preserved in frontmatter. Tests: 210 → 226.
+is preserved in frontmatter. Tests: 210 → 228.
 ```
 
 - [ ] **Step 2: Commit**
@@ -1305,8 +1308,8 @@ Leave the wiki pages — they're real content. If you want them gone:
 
 - [ ] **Step 7: Final full-suite run**
 
-Run: `.venv/bin/python -m pytest -q`
-Expected: all PASS (~226 tests).
+Run: `.venv/bin/python -m pytest tests/ -q`
+Expected: all PASS (~228 tests).
 
 ---
 
