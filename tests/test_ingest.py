@@ -269,3 +269,37 @@ def test_ingest_text_refuses_handwritten(vault, fake_chat):
     res = ingest_cmd.ingest_text("body", page_name="hand", source_label="x", force=True)
     assert res.status == ingest_cmd.REFUSED_HANDWRITTEN
     assert (paths.sources_dir / "hand.md").read_text() == "# mine\n\nhand-written\n"
+
+
+def test_ingest_text_different_source_same_slug_gets_suffix(vault, fake_chat):
+    """Two different sources that slugify to the same stem must not collide —
+    the second gets a -2 suffix instead of being skipped."""
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    r1 = ingest_cmd.ingest_text("body one", page_name="Article",
+                                source_label="https://a.example/article")
+    r2 = ingest_cmd.ingest_text("body two", page_name="Article",
+                                source_label="https://b.example/article")
+    assert r1.status == ingest_cmd.WROTE
+    assert r2.status == ingest_cmd.WROTE
+    assert (paths.sources_dir / "Article.md").is_file()
+    assert (paths.sources_dir / "Article-2.md").is_file()
+    # The two pages record their distinct sources.
+    assert 'source-path: "https://a.example/article"' in (paths.sources_dir / "Article.md").read_text()
+    assert 'source-path: "https://b.example/article"' in (paths.sources_dir / "Article-2.md").read_text()
+    # Index has both rows.
+    idx = paths.index.read_text()
+    assert "[Article](sources/Article.md)" in idx
+    assert "[Article-2](sources/Article-2.md)" in idx
+
+
+def test_ingest_text_same_source_same_slug_is_idempotent(vault, fake_chat):
+    """Re-ingesting the SAME source must stay idempotent (no -2 spawned)."""
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    ingest_cmd.ingest_text("body", page_name="Article",
+                           source_label="https://a.example/article")
+    r2 = ingest_cmd.ingest_text("body", page_name="Article",
+                                source_label="https://a.example/article")
+    assert r2.status == ingest_cmd.ALREADY_EXISTS
+    assert not (paths.sources_dir / "Article-2.md").exists()

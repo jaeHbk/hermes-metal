@@ -142,6 +142,30 @@ def _extract_summary(body: str) -> str:
     return snippet or "(no summary)"
 
 
+def _page_source(path: Path) -> str | None:
+    """Return the ``source-path`` value recorded in a managed page's
+    frontmatter, or ``None`` if absent/unreadable. Used to tell whether an
+    existing page came from the SAME source (idempotent re-ingest) or a
+    DIFFERENT one that merely slugified to the same name (collision)."""
+    try:
+        head = path.read_text(encoding="utf-8", errors="replace")[:2048]
+    except OSError:
+        return None
+    if not head.startswith("---"):
+        return None
+    end = head.find("\n---", 3)
+    block = head[3:end] if end != -1 else head[3:]
+    for line in block.splitlines():
+        line = line.strip()
+        if line.startswith("source-path:"):
+            val = line[len("source-path:"):].strip()
+            # Values are rendered quoted: source-path: "the/value"
+            if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+                val = val[1:-1].replace('\\"', '"')
+            return val
+    return None
+
+
 # ------------------------------------------------------------------- run
 
 
@@ -169,13 +193,30 @@ def ingest_text(
     """
     stem = _slugify(page_name)
     paths = wiki.get_paths()
-    page_path = paths.sources_dir / f"{stem}.md"
 
-    # Hand-written-file guard MUST run regardless of --force.
-    if page_path.exists() and not wiki.is_managed(page_path):
-        return IngestResult(REFUSED_HANDWRITTEN, page_path, "")
-    if page_path.exists() and not force:
-        return IngestResult(ALREADY_EXISTS, page_path, "")
+    # Resolve the target page, disambiguating real collisions. Walk
+    # <stem>.md, <stem>-2.md, ... until we find a slot that is free, or holds
+    # a HAND-WRITTEN file (refuse), or holds a managed page for the SAME
+    # source (idempotent) or a DIFFERENT source (collision → keep walking).
+    page_path = paths.sources_dir / f"{stem}.md"
+    n = 1
+    while True:
+        if not page_path.exists():
+            break  # free slot → write here
+        if not wiki.is_managed(page_path):
+            return IngestResult(REFUSED_HANDWRITTEN, page_path, "")
+        if _page_source(page_path) == source_label:
+            # Same source already ingested at this slot.
+            if not force:
+                return IngestResult(ALREADY_EXISTS, page_path, "")
+            break  # --force: re-summarize this same-source page in place
+        # Managed page for a DIFFERENT source → collision; try next suffix.
+        n += 1
+        page_path = paths.sources_dir / f"{stem}-{n}.md"
+
+    # `stem` is used for the page title, index row, and log subject; keep it
+    # in sync with the (possibly suffixed) filename we settled on.
+    stem = page_path.stem
 
     if len(body) > MAX_SOURCE_CHARS:
         body = body[:MAX_SOURCE_CHARS] + _TRUNCATION_MARKER
