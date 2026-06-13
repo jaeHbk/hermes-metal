@@ -229,3 +229,43 @@ def test_ingest_text_truncates_long_body_once(vault, fake_chat, monkeypatch):
     assert res.status == ic.WROTE
     # Exactly one truncation marker in the prompt sent to the chat server.
     assert captured["user"].count("[truncated for length]") == 1
+
+
+# ----------------------------------------------------------- ingest_text core
+
+
+def test_ingest_text_writes_with_extra_frontmatter(vault, fake_chat):
+    """The shared core writes a page and threads extra frontmatter (the
+    URL-provenance path uses this for source-url)."""
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+
+    res = ingest_cmd.ingest_text(
+        "Raw article body text.",
+        page_name="My Article",
+        source_label="https://example.com/my-article",
+        extra_frontmatter={"source-url": "https://example.com/my-article",
+                           "ingested-via": "url"},
+    )
+    assert res.status == ingest_cmd.WROTE
+    page = paths.sources_dir / "My_Article.md"
+    assert page.is_file()
+    body = page.read_text()
+    assert 'source-url: "https://example.com/my-article"' in body
+    assert 'ingested-via: "url"' in body
+
+
+def test_ingest_text_already_exists_is_idempotent(vault, fake_chat):
+    wiki.init_wiki()
+    ingest_cmd.ingest_text("body", page_name="dup", source_label="x")
+    res = ingest_cmd.ingest_text("body", page_name="dup", source_label="x")
+    assert res.status == ingest_cmd.ALREADY_EXISTS
+
+
+def test_ingest_text_refuses_handwritten(vault, fake_chat):
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    (paths.sources_dir / "hand.md").write_text("# mine\n\nhand-written\n")
+    res = ingest_cmd.ingest_text("body", page_name="hand", source_label="x", force=True)
+    assert res.status == ingest_cmd.REFUSED_HANDWRITTEN
+    assert (paths.sources_dir / "hand.md").read_text() == "# mine\n\nhand-written\n"
