@@ -8,6 +8,33 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-13 — Web ingestion (`ingest --url` + `ingest-links`)
+
+**Problem:** Ingest only accepted local files. The natural "second brain" inflow
+— a browser full of tabs/links — had no path in; the user had to manually save
+each page to disk first.
+
+**Change:** New `src/web.py` (`fetch_article`: httpx fetch + trafilatura
+boilerplate-stripping → clean markdown, with title/date metadata). Refactored
+`src/ingest_cmd.py` to expose a shared `ingest_text()` core (page → index → log
+write-with-rollback) that file, URL, and batch ingestion all call — one tested
+write-path, no duplication. New `src/ingest_links_cmd.py`: a skip-and-continue
+batch driver over a text file of URLs, idempotent on re-run, writing failed URLs
+to `<input>.failed.txt` (a valid links file for retry) and auto-indexing new
+pages via the existing `--backfill`. CLI gains `hermes ingest --url <url>` and
+`hermes ingest-links <file> [--force] [--max-tokens] [--no-index]`. `doctor`
+gains a Web-ingest section probing trafilatura. Added `trafilatura` to
+requirements.
+
+**Files:** `src/web.py` (new), `src/ingest_cmd.py` (refactor), `src/ingest_links_cmd.py`
+(new), `src/cli.py`, `src/doctor.py`, `requirements.txt`, `README.md`,
+`tests/test_web.py` (new), `tests/test_ingest_links_cmd.py` (new),
+`tests/test_ingest.py` (extended), `tests/test_doctor_plist.py` (extended).
+
+**Impact:** A reading list of links becomes a set of cross-linked wiki source
+pages in one command, retrievable on the next query. Provenance (`source-url`)
+is preserved in frontmatter. Tests: 210 → 231.
+
 ## 2026-06-07 — LaunchAgent exit-78 hardening (invalid-plist guard + diagnosis)
 
 **Problem:** All three LaunchAgents reported `last exit code = 78` (EX_CONFIG)
