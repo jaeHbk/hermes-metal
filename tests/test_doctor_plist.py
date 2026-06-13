@@ -80,3 +80,13 @@ def test_shipped_templates_render_to_valid_xml(tmp_path: Path):
         out.write_text(text)
         ok, err = _strict_plist_ok(out)
         assert ok, f"{name}.plist.template renders to invalid XML: {err}"
+
+
+def test_check_web_reports_trafilatura():
+    from src import doctor
+    section = doctor.check_web()
+    assert section.title == "Web ingest"
+    assert len(section.results) == 1
+    # trafilatura is a project dep (installed), so it should be OK; if a CI
+    # env lacks it the WARN path is also acceptable — assert it's one of them.
+    assert section.results[0].level in (doctor.OK, doctor.WARN)
