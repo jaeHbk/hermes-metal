@@ -9,3 +9,12 @@ third_party/llama.cpp/build/
 config/host_topology.env
 .env
 tmp/
+graphify-out/
+
+# Gas Town (added by gt)
+.runtime/
+.claude/
+.logs/
+state.json
+CLAUDE.md
+CLAUDE.local.md

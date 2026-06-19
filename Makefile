@@ -305,6 +305,17 @@ install-engine-daemon:
 	@mkdir -p "$(HOME)/Library/LaunchAgents" "$(SLOTS_DIR)" "$(LOGS_DIR)"
 	@. "$(HOST_TOPOLOGY)"; . "$(ENGINE_FLAGS)"; \
 	echo "    tier=$$TIER  ctx=$$CONTEXT_TOKENS  threads=$$THREAD_COUNT  port=$$ENGINE_PORT"; \
+	if [ -n "$${MODEL_DRAFT_FILE:-}" ]; then \
+		if [ ! -f "$(MODELS_DIR)/$$MODEL_DRAFT_FILE" ]; then \
+			echo "ERROR: draft model $(MODELS_DIR)/$$MODEL_DRAFT_FILE missing (MODEL_DRAFT_FILE set). Run 'make fetch-model' or clear MODEL_DRAFT_FILE."; \
+			exit 1; \
+		fi; \
+		DRAFT_ARGS="<string>-md</string><string>$(MODELS_DIR)/$$MODEL_DRAFT_FILE</string><string>-ngld</string><string>$${DRAFT_N_GPU_LAYERS:-99}</string><string>--spec-draft-n-max</string><string>$${DRAFT_N_MAX:-8}</string>"; \
+		echo "    speculative: -md $$MODEL_DRAFT_FILE  -ngld $${DRAFT_N_GPU_LAYERS:-99}  --spec-draft-n-max $${DRAFT_N_MAX:-8}"; \
+	else \
+		DRAFT_ARGS=""; \
+		echo "    speculative: disabled (MODEL_DRAFT_FILE empty)"; \
+	fi; \
 	sed \
 		-e "s|{WORKING_DIR}|$(WORKING_DIR)|g" \
 		-e "s|{MODEL_PATH}|$(MODEL_PATH)|g" \
@@ -314,6 +325,7 @@ install-engine-daemon:
 		-e "s|{CACHE_TYPE_K}|$$CACHE_TYPE_K|g" \
 		-e "s|{CACHE_TYPE_V}|$$CACHE_TYPE_V|g" \
 		-e "s|{SLOT_SAVE_PATH}|$$SLOT_SAVE_PATH|g" \
+		-e "s|{DRAFT_ARGS}|$$DRAFT_ARGS|g" \
 		"$(PLIST_TEMPLATE)" > "$(ENGINE_PLIST)"
 	@echo "    rendered:    $(ENGINE_PLIST)"
 	@$(MAKE) --no-print-directory _bootstrap PLIST=$(ENGINE_PLIST) TARGET=$(ENGINE_TARGET)

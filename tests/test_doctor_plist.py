@@ -68,6 +68,12 @@ def test_shipped_templates_render_to_valid_xml(tmp_path: Path):
         "{EMBED_PORT}": "8081", "{CACHE_TYPE_K}": "q8_0", "{CACHE_TYPE_V}": "q8_0",
         "{SLOT_SAVE_PATH}": "storage/slots", "{VAULT_PATH}": "/v",
         "{DIGEST_HOUR}": "7", "{DIGEST_MINUTE}": "30", "{DIGEST_PUSH}": "0",
+        # Speculative decoding (E5): the Makefile expands {DRAFT_ARGS} to either a
+        # run of <string> elements or nothing. Exercise the populated form here so
+        # the regression guard covers the speculative-on render too.
+        "{DRAFT_ARGS}": "<string>-md</string><string>/d.gguf</string>"
+                        "<string>-ngld</string><string>99</string>"
+                        "<string>--spec-draft-n-max</string><string>8</string>",
     }
     for name in ("daemon", "embed", "watcher", "digest"):
         tpl = repo / "config" / f"{name}.plist.template"
@@ -80,3 +86,13 @@ def test_shipped_templates_render_to_valid_xml(tmp_path: Path):
         out.write_text(text)
         ok, err = _strict_plist_ok(out)
         assert ok, f"{name}.plist.template renders to invalid XML: {err}"
+
+
+def test_check_web_reports_trafilatura():
+    from src import doctor
+    section = doctor.check_web()
+    assert section.title == "Web ingest"
+    assert len(section.results) == 1
+    # trafilatura is a project dep (installed), so it should be OK; if a CI
+    # env lacks it the WARN path is also acceptable — assert it's one of them.
+    assert section.results[0].level in (doctor.OK, doctor.WARN)
