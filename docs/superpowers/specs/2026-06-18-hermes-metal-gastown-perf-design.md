@@ -127,11 +127,31 @@ roadmap item as a side effect.
 **Tolerances (explicit, to remove ambiguity):**
 - Perplexity regression threshold: **> baseline + 0.10** fails (REPORT.md calls
   < 0.1 tokenizer-noise).
-- RSS regression threshold: **> baseline × 1.10** fails **by default**.
+- RSS regression threshold: **absolute ceiling**, default **1024 MiB** on the
+  36 GiB Pro tier (see the amendment below).
 - Throughput is *not* a pass/fail axis by itself — it is the *objective*. A
   bead that passes guardrails but shows no throughput gain is reported and left
   for the human to accept or reject (it may still be worth landing, e.g. a
   submodule bump that's neutral now but unblocks later work).
+
+> **AMENDMENT (2026-06-18, discovered by the E1-readiness spike — RSS is mmap-noisy).**
+> The original design gated RSS on a relative `× 1.10` factor. The spike proved
+> that unworkable: llama.cpp **mmaps** the GGUF (default on), so the benchmark's
+> sampled peak RSS reflects only the *currently-resident* page set, which (a)
+> never approaches the true ~4.7 GB weight footprint (the live server shows
+> ~140 MiB RSS) and (b) varies run-to-run by **several-fold** (observed
+> 37 → 154 → 294 MiB for the same prompt) as pages fault in lazily. A ×1.10
+> relative gate therefore fires on pure measurement noise, not regressions.
+> **Resolution:** the gate uses an **absolute** RSS ceiling for ALL beads. The
+> `compare()` function already supports this via `rss_ceiling_mib`; the
+> orchestrator (`scripts/bench_gate.sh`) supplies a tier default of **1024 MiB**
+> when a bead sets none. 1024 MiB is comfortably above the observed noisy peak
+> (<300 MiB for the base config) yet far below MLX's ~1.8 GiB path, so it still
+> catches a genuine memory balloon. E5 (speculative decoding) overrides this to
+> a *tighter* **700 MiB** via `BENCH_GATE_RSS_CEILING_MIB`, since its resident
+> draft model is the one deliberate memory trade and deserves the closer watch.
+> The relative `× rss_factor` code path is retained in `compare()` (still unit-
+> tested) but is no longer the gate's default.
 
 **Per-bead RSS budget (resolves the E5 tension).** A few experiments — chiefly
 E5 speculative decoding — trade memory *for* decode speed by design; a resident
