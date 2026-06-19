@@ -8,6 +8,51 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-19 — Gastown perf harness + bench-gate (and an empirical "already near-optimal" result)
+
+**Problem:** No safe, repeatable way to try engine-level perf experiments. The
+benchmark numbers (decode ~23 t/s, ppl 8.40) suggested headroom vs MLX, but any
+flag change risked silently regressing the two qualities that justify llama.cpp
+for an always-on daemon: low RSS and low perplexity. There was no mechanism to
+make "don't regress quality/memory" a hard, mechanical gate.
+
+**Change:** Built a reusable, gated multi-agent harness (Gastown polecats in
+isolated worktrees → human-approved merges) on top of a new **bench-gate**:
+- `bench/gate.py` (+ `tests/test_gate.py`, 11 tests) — verdict logic: perplexity
+  ≤ baseline+0.10 and RSS ≤ an **absolute** ceiling (default 1024 MiB; per-bead
+  override) are hard guardrails; throughput is the objective, never a hard fail.
+- `scripts/bench_gate.sh` (`--quick`/`--full`, exit 0/1/2) — orchestrates
+  pytest + the existing `bench/` harness + the verdict; writes `gate-<sha>.json`.
+- `bench/results/baseline.json` (seeded from a real M3-Pro/Metal measurement:
+  decode ~23 t/s, ppl **8.3215**) + append-only `bench/results/history.tsv`
+  (`scripts/bench_history_append.sh`) — delivers the long-wanted versioned
+  benchmark history. `bench/.gitignore` carved out so these track while per-run
+  outputs stay ignored.
+- Toggleable speculative-decoding plumbing in `config/engine_flags.env` +
+  `config/daemon.plist.template` + Makefile render (+ `tests/test_doctor_plist.py`),
+  **shipped disabled**.
+- Runbook: `docs/gastown-harness.md`.
+
+**Impact / findings (the honest result):** the gate works — proven both by an
+end-to-end spike (E1) and a negative test (it correctly rejects a synthetic
+perplexity regression and an RSS balloon while passing clean runs). The
+*performance* finding is that **the base config is already near-optimal on this
+M3 Pro**: prefill is GPU-bound and decode is UMA-bandwidth-bound, so the
+CPU-side levers don't move it. Specifically — **E2 (thread tuning):** measured
+no-op (flat ~333 t/s prefill across `-t/-tb` 2/2→12/12); documented, no knob
+added. **E5 (speculative decoding):** does not engage on this llama.cpp build
+(`no implementations specified for speculative decoding`, draft_n=null) and was
+*slower* (~14–20 vs ~23 t/s); infra landed disabled + tested for future
+re-evaluation. E3/E4/E6/E7 deprioritized given the GPU-bound result (parked in
+Beads + `docs/ROADMAP-gastown-slices.md`). Net product change is conservative by
+design: **zero quality/memory regression, no runtime behavior change**, plus a
+reusable harness and a documented empirical baseline. Biggest operational
+lesson: the mmap'd-model **RSS-warmth artifact** makes daemon-RSS a noisy gate
+axis (see the harness doc); resolving that measurement is the top follow-up
+before the next experiment that restarts the daemon.
+
+---
+
 ## 2026-06-13 — Web ingestion (`ingest --url` + `ingest-links`)
 
 **Problem:** Ingest only accepted local files. The natural "second brain" inflow
