@@ -68,6 +68,12 @@ def test_shipped_templates_render_to_valid_xml(tmp_path: Path):
         "{EMBED_PORT}": "8081", "{CACHE_TYPE_K}": "q8_0", "{CACHE_TYPE_V}": "q8_0",
         "{SLOT_SAVE_PATH}": "storage/slots", "{VAULT_PATH}": "/v",
         "{DIGEST_HOUR}": "7", "{DIGEST_MINUTE}": "30", "{DIGEST_PUSH}": "0",
+        # Speculative decoding (E5): the Makefile expands {DRAFT_ARGS} to either a
+        # run of <string> elements or nothing. Exercise the populated form here so
+        # the regression guard covers the speculative-on render too.
+        "{DRAFT_ARGS}": "<string>-md</string><string>/d.gguf</string>"
+                        "<string>-ngld</string><string>99</string>"
+                        "<string>--spec-draft-n-max</string><string>8</string>",
     }
     for name in ("daemon", "embed", "watcher", "digest"):
         tpl = repo / "config" / f"{name}.plist.template"

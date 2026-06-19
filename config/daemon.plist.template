@@ -60,6 +60,21 @@
         -->
         <string>--slot-save-path</string>
         <string>{WORKING_DIR}/{SLOT_SAVE_PATH}</string>
+        <!--
+            Speculative decoding (E5, hm-0y4). The DRAFT placeholder below is
+            expanded by the Makefile install-daemon render: when MODEL_DRAFT_FILE
+            is set it emits the model-draft, gpu-layers-draft and spec-draft-n-max
+            argument strings; when empty it expands to nothing, so the daemon
+            launches with no draft model (speculative decoding off). Kept as a
+            single placeholder so the on/off case stays a pure config toggle, not
+            a template edit.
+            (Flag names in this comment are spelled out on purpose: a literal
+            double hyphen inside an XML comment is illegal and makes launchd
+            reject the plist with exit 78. The placeholder token itself is kept
+            out of this comment so the render substitution cannot inject markup
+            here.)
+        -->
+        {DRAFT_ARGS}
     </array>
 
     <key>WorkingDirectory</key>
