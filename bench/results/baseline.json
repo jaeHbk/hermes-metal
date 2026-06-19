@@ -9,20 +9,26 @@
   },
   "prompts": {
     "short_qa": {
-      "decode_tps": 23.04428923355504,
-      "prefill_tps": 202.41378437871617,
-      "peak_rss_bytes": 38535168
+      "decode_tps": 23.0857432459547,
+      "prefill_tps": 206.0368806016277,
+      "peak_rss_bytes": 231948288
     },
     "medium_summary": {
-      "decode_tps": 23.047946932102185,
-      "prefill_tps": 320.47941840429456,
-      "peak_rss_bytes": 94339072
+      "decode_tps": 23.147329770151533,
+      "prefill_tps": 322.4453498492627,
+      "peak_rss_bytes": 228147200
     },
     "long_context": {
-      "decode_tps": 23.051022537957202,
-      "prefill_tps": 318.2190036526207,
-      "peak_rss_bytes": 187219968
+      "decode_tps": 23.20444082237626,
+      "prefill_tps": 319.88979519194544,
+      "peak_rss_bytes": 308363264
     }
   },
-  "perplexity": 8.3215
+  "perplexity": 8.3215,
+  "runs": [
+    {
+      "backend": "llama_cpp",
+      "perplexity": 8.3215
+    }
+  ]
 }

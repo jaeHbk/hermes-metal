@@ -38,10 +38,12 @@ def load_perplexity(path: str | Path) -> float:
 
 def make_baseline(throughput_path: str | Path, perplexity_path: str | Path) -> dict[str, Any]:
     host = json.loads(Path(throughput_path).read_text()).get("host", {})
+    ppl = load_perplexity(perplexity_path)
     return {
         "host": host,
         "prompts": load_throughput(throughput_path),
-        "perplexity": load_perplexity(perplexity_path),
+        "perplexity": ppl,
+        "runs": [{"backend": LLAMA_CPP, "perplexity": ppl}],  # so baseline.json doubles as a ppl input in --quick
     }
 
 
