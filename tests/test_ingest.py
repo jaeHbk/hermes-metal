@@ -209,3 +209,97 @@ def test_extract_summary_falls_back_when_section_missing():
     body = "Something else entirely.\n"
     out = ingest_cmd._extract_summary(body)
     assert "Something else" in out
+
+
+def test_ingest_text_truncates_long_body_once(vault, fake_chat, monkeypatch):
+    """A source over the cap is truncated exactly once, with a single marker.
+    Guards against re-introducing a second truncation pass."""
+    import src.ingest_cmd as ic
+    captured = {}
+
+    def _capture_chat(self, messages, **_kw):
+        captured["user"] = messages[1]["content"]
+        return ("## Summary\nS.\n\n## Key claims\n- c\n\n"
+                "## Entities and concepts\n- [[E]]: x.\n\n## Open questions\n- q\n")
+    monkeypatch.setattr("src.server.client.HermesClient.chat_sync", _capture_chat)
+
+    wiki.init_wiki()
+    big = "x" * 50_000
+    res = ic.ingest_text(big, page_name="big", source_label="big-src")
+    assert res.status == ic.WROTE
+    # Exactly one truncation marker in the prompt sent to the chat server.
+    assert captured["user"].count("[truncated for length]") == 1
+
+
+# ----------------------------------------------------------- ingest_text core
+
+
+def test_ingest_text_writes_with_extra_frontmatter(vault, fake_chat):
+    """The shared core writes a page and threads extra frontmatter (the
+    URL-provenance path uses this for source-url)."""
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+
+    res = ingest_cmd.ingest_text(
+        "Raw article body text.",
+        page_name="My Article",
+        source_label="https://example.com/my-article",
+        extra_frontmatter={"source-url": "https://example.com/my-article",
+                           "ingested-via": "url"},
+    )
+    assert res.status == ingest_cmd.WROTE
+    page = paths.sources_dir / "My_Article.md"
+    assert page.is_file()
+    body = page.read_text()
+    assert 'source-url: "https://example.com/my-article"' in body
+    assert 'ingested-via: "url"' in body
+
+
+def test_ingest_text_already_exists_is_idempotent(vault, fake_chat):
+    wiki.init_wiki()
+    ingest_cmd.ingest_text("body", page_name="dup", source_label="x")
+    res = ingest_cmd.ingest_text("body", page_name="dup", source_label="x")
+    assert res.status == ingest_cmd.ALREADY_EXISTS
+
+
+def test_ingest_text_refuses_handwritten(vault, fake_chat):
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    (paths.sources_dir / "hand.md").write_text("# mine\n\nhand-written\n")
+    res = ingest_cmd.ingest_text("body", page_name="hand", source_label="x", force=True)
+    assert res.status == ingest_cmd.REFUSED_HANDWRITTEN
+    assert (paths.sources_dir / "hand.md").read_text() == "# mine\n\nhand-written\n"
+
+
+def test_ingest_text_different_source_same_slug_gets_suffix(vault, fake_chat):
+    """Two different sources that slugify to the same stem must not collide —
+    the second gets a -2 suffix instead of being skipped."""
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    r1 = ingest_cmd.ingest_text("body one", page_name="Article",
+                                source_label="https://a.example/article")
+    r2 = ingest_cmd.ingest_text("body two", page_name="Article",
+                                source_label="https://b.example/article")
+    assert r1.status == ingest_cmd.WROTE
+    assert r2.status == ingest_cmd.WROTE
+    assert (paths.sources_dir / "Article.md").is_file()
+    assert (paths.sources_dir / "Article-2.md").is_file()
+    # The two pages record their distinct sources.
+    assert 'source-path: "https://a.example/article"' in (paths.sources_dir / "Article.md").read_text()
+    assert 'source-path: "https://b.example/article"' in (paths.sources_dir / "Article-2.md").read_text()
+    # Index has both rows.
+    idx = paths.index.read_text()
+    assert "[Article](sources/Article.md)" in idx
+    assert "[Article-2](sources/Article-2.md)" in idx
+
+
+def test_ingest_text_same_source_same_slug_is_idempotent(vault, fake_chat):
+    """Re-ingesting the SAME source must stay idempotent (no -2 spawned)."""
+    wiki.init_wiki()
+    paths = wiki.get_paths()
+    ingest_cmd.ingest_text("body", page_name="Article",
+                           source_label="https://a.example/article")
+    r2 = ingest_cmd.ingest_text("body", page_name="Article",
+                                source_label="https://a.example/article")
+    assert r2.status == ingest_cmd.ALREADY_EXISTS
+    assert not (paths.sources_dir / "Article-2.md").exists()

@@ -4,6 +4,11 @@
 __pycache__/
 *.pyc
 
-# Benchmark outputs are timestamped and machine-specific; commit results manually
-results/
+# Benchmark outputs are timestamped and machine-specific; commit results manually.
+# Ignore the per-run outputs, but TRACK the durable gate artifacts (baseline,
+# versioned history, and the aggregated report) that the bench-gate depends on.
+results/throughput-*.json
+results/perplexity-*.json
+results/gate-*.json
+results/power-*
 *.log

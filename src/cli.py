@@ -385,7 +385,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "ingest",
         help="Summarize a raw source into a wiki page (writes wiki/sources/<stem>.md).",
     )
-    ingest.add_argument("path", help="Path to the source file.")
+    ingest.add_argument("path", nargs="?", default=None,
+                        help="Path to the source file.")
+    ingest.add_argument("--url", default=None,
+                        help="Fetch and summarize a web page instead of a local file.")
     ingest.add_argument("--force", action="store_true",
                         help="Overwrite an existing wiki page.")
     ingest.add_argument("--name", default=None,
@@ -393,6 +396,20 @@ def _build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--max-tokens", type=int, default=1024,
                         help="Cap on chat server response.")
     ingest.set_defaults(func=_cmd_ingest)
+
+    ingest_links = sub.add_parser(
+        "ingest-links",
+        help="Fetch + summarize every URL in a text file (one URL per line).",
+    )
+    ingest_links.add_argument("file", help="Path to a text file of URLs (one per line; "
+                                           "blank lines and # comments ignored).")
+    ingest_links.add_argument("--force", action="store_true",
+                              help="Re-summarize URLs whose wiki page already exists.")
+    ingest_links.add_argument("--max-tokens", type=int, default=1024,
+                              help="Cap on chat server response per page.")
+    ingest_links.add_argument("--no-index", action="store_true",
+                              help="Skip auto-indexing the new pages at the end.")
+    ingest_links.set_defaults(func=_cmd_ingest_links)
 
     index = sub.add_parser(
         "index",
@@ -431,6 +448,18 @@ def _run_doctor_late() -> int:
 
 def _cmd_ingest(args: argparse.Namespace) -> int:
     from src import ingest_cmd
+
+    if args.url and args.path:
+        print("hermes ingest: pass either a path or --url, not both.", file=sys.stderr)
+        return 2
+    if args.url:
+        return _ingest_one_url(
+            args.url, name=args.name, force=args.force, max_tokens=args.max_tokens,
+        )
+    if not args.path:
+        print("hermes ingest: provide a file path or --url <url>.", file=sys.stderr)
+        return 2
+
     flags: list[str] = [args.path]
     if args.force:
         flags.append("--force")
@@ -438,6 +467,73 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
         flags.extend(["--name", args.name])
     flags.extend(["--max-tokens", str(args.max_tokens)])
     return ingest_cmd.run(flags)
+
+
+def _ingest_one_url(url: str, *, name: str | None, force: bool, max_tokens: int) -> int:
+    from src import web, ingest_cmd, wiki
+
+    paths = wiki.get_paths()
+    if not wiki.is_initialized(paths):
+        print(f"hermes ingest: wiki not initialized at {paths.root}", file=sys.stderr)
+        print(f"               run: hermes wiki init", file=sys.stderr)
+        return 2
+
+    try:
+        art = web.fetch_article(url)
+    except web.WebError as exc:
+        print(f"hermes ingest: {exc}", file=sys.stderr)
+        return 1
+
+    page_name = name or art.title or _name_from_url(url)
+    extra = {"source-url": url, "ingested-via": "url"}
+    if art.title:
+        extra["source-title"] = art.title
+    if art.date:
+        extra["source-date"] = art.date
+
+    print(f"hermes ingest: fetched {url} — summarizing (30-60s)...", file=sys.stderr)
+    try:
+        res = ingest_cmd.ingest_text(
+            art.text, page_name=page_name, source_label=url,
+            extra_frontmatter=extra, max_tokens=max_tokens, force=force,
+        )
+    except HermesError as exc:
+        print(f"hermes ingest: chat server error: {exc}", file=sys.stderr)
+        print(f"               (try: hermes doctor)", file=sys.stderr)
+        return 1
+
+    if res.status == ingest_cmd.REFUSED_HANDWRITTEN:
+        print(f"hermes ingest: refusing to overwrite hand-written file: {res.page_path}",
+              file=sys.stderr)
+        return 1
+    if res.status == ingest_cmd.ALREADY_EXISTS:
+        print(f"hermes ingest: {res.page_path.name} already exists "
+              f"(use --force to re-summarize).", file=sys.stderr)
+        return 0
+    print(f"hermes ingest: wrote {res.page_path.relative_to(paths.root.parent)}")
+    print(f"               summary: {res.summary}")
+    return 0
+
+
+def _name_from_url(url: str) -> str:
+    """Derive a page name from a URL when there's no title: last non-empty
+    path segment, else the host."""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    segs = [s for s in parsed.path.split("/") if s]
+    if segs:
+        return segs[-1].rsplit(".", 1)[0]  # drop a trailing .html etc.
+    return parsed.netloc or url
+
+
+def _cmd_ingest_links(args: argparse.Namespace) -> int:
+    from src import ingest_links_cmd
+    flags = [args.file, "--max-tokens", str(args.max_tokens)]
+    if args.force:
+        flags.append("--force")
+    if args.no_index:
+        flags.append("--no-index")
+    return ingest_links_cmd.run(flags)
 
 
 def _cmd_index(args: argparse.Namespace) -> int:

@@ -343,6 +343,25 @@ def check_python() -> Section:
     return s
 
 
+def check_web() -> Section:
+    """Probe the optional web-ingest extractor (trafilatura). Web ingest is
+    additive; if trafilatura is missing, `ingest --url` / `ingest-links` are
+    the only things affected, so this is a WARN, not a FAIL."""
+    s = Section("Web ingest")
+    venv_py = REPO_ROOT / ".venv" / "bin" / "python"
+    py = str(venv_py) if venv_py.is_file() else sys.executable
+    rc, _out, err = _run([py, "-c", "import trafilatura"], timeout=10.0)
+    if rc == 0:
+        s.add(Result("trafilatura", OK, "import OK (web ingest available)"))
+    else:
+        s.add(Result(
+            "trafilatura", WARN,
+            "not installed — `hermes ingest --url` / `ingest-links` unavailable",
+            fix=".venv/bin/pip install trafilatura",
+        ))
+    return s
+
+
 def check_models() -> Section:
     s = Section("Models")
     flags = _engine_flags()
@@ -864,6 +883,7 @@ def run_all() -> list[Section]:
         check_repo(),
         check_build(),
         check_python(),
+        check_web(),
         check_models(),
         check_config(),
         check_agents(),

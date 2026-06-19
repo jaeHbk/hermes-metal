@@ -1,0 +1,34 @@
+{
+  "host": {
+    "arch": "arm64",
+    "macos": "26.5",
+    "chip": "Apple M3 Pro",
+    "ram_gib": 36,
+    "pcores": 6,
+    "ecores": 6
+  },
+  "prompts": {
+    "short_qa": {
+      "decode_tps": 23.0857432459547,
+      "prefill_tps": 206.0368806016277,
+      "peak_rss_bytes": 231948288
+    },
+    "medium_summary": {
+      "decode_tps": 23.147329770151533,
+      "prefill_tps": 322.4453498492627,
+      "peak_rss_bytes": 228147200
+    },
+    "long_context": {
+      "decode_tps": 23.20444082237626,
+      "prefill_tps": 319.88979519194544,
+      "peak_rss_bytes": 308363264
+    }
+  },
+  "perplexity": 8.3215,
+  "runs": [
+    {
+      "backend": "llama_cpp",
+      "perplexity": 8.3215
+    }
+  ]
+}
