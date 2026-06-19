@@ -307,3 +307,18 @@ green-tests-alone; guardrails are mandatory.
 
 Worktrees, integration branch, and gating ensure none of these touch `main` or
 `feat/phases-b-e` until the human merges the final cumulative PR.
+
+---
+
+## E1 spike + negative-test outcome (2026-06-19) — DECISION GATE: PASS → proceed to fan-out
+
+**E1 (spike, bead hm-o5i):** polecat `furiosa` spawned in an isolated worktree, self-resolved the missing gitignored runtime by symlinking `.venv`/`build`/`models` from the canonical checkout, ran `bench_gate.sh --full` → **gate PASS** (ppl 8.3215 == baseline, max RSS 304 MiB < 1024, 244 tests). Audit found `-fa` + `--prompt-cache` already live (prompt-cache via the server-native `--slot-save-path` + `/slots` API, not a CLI flag) → **no engine-flag change warranted**. MR `hm-wisp-o3b` was **rejected by the Overseer** because it carried only worktree cruft (a machine-local `.venv` symlink + `CLAUDE.local.md` churn); integration branch `perf/gastown-run-1` stayed clean at `93321b8`. Bead closed.
+
+**Negative test (gate teeth), run directly against `bench.gate`:**
+- Perplexity regression (8.55 vs baseline 8.3215, +0.23 > 0.10 tol) → **FAIL, exit 1** ("perplexity regression").
+- RSS balloon (1500 MiB > 1024 ceiling) → **FAIL, exit 1** ("rss over absolute ceiling").
+- Control (unchanged baseline) → **PASS, exit 0** (no false-positive).
+
+**Operational findings carried into E2–E7:** (1) each polecat ~11 min, serial due to single Metal GPU + shared `:8080` daemon; (2) fresh-clone worktrees lack the ~5 GB gitignored runtime → polecats symlink it and must be guarded against committing those symlinks. A "RUNTIME/CRUFT GUARD" note was appended to beads E2–E6 (verify diff is flag-only before `gt done`).
+
+**Decision (§7A):** harness loop validated + gate rejects regressions on both hard axes while passing clean runs → **trusted; fan out E2–E7.**
