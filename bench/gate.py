@@ -112,3 +112,51 @@ def compare(
                                deltas, current_ppl, base_ppl, max_rss)
 
     return Verdict(True, improved, "ok", deltas, current_ppl, base_ppl, max_rss)
+
+
+def _cli(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="bench.gate")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    mb = sub.add_parser("make-baseline")
+    mb.add_argument("--throughput", required=True)
+    mb.add_argument("--perplexity", required=True)
+    mb.add_argument("--out", required=True)
+
+    ck = sub.add_parser("check")
+    ck.add_argument("--current-throughput", required=True)
+    ck.add_argument("--current-perplexity", required=True)
+    ck.add_argument("--baseline", required=True)
+    ck.add_argument("--rss-ceiling-mib", type=int, default=None)
+    ck.add_argument("--out", required=True)
+
+    args = ap.parse_args(argv)
+
+    if args.cmd == "make-baseline":
+        base = make_baseline(args.throughput, args.perplexity)
+        Path(args.out).write_text(json.dumps(base, indent=2))
+        print(f"wrote baseline: {args.out}")
+        return 0
+
+    baseline = json.loads(Path(args.baseline).read_text())
+    cur_t = load_throughput(args.current_throughput)
+    cur_p = load_perplexity(args.current_perplexity)
+    v = compare(cur_t, cur_p, baseline, rss_ceiling_mib=args.rss_ceiling_mib)
+    Path(args.out).write_text(json.dumps({
+        "ok": v.ok, "improved": v.improved, "reason": v.reason,
+        "deltas": v.deltas, "current_ppl": v.current_ppl,
+        "baseline_ppl": v.baseline_ppl, "max_rss_bytes": v.max_rss_bytes,
+    }, indent=2))
+    # human-readable card
+    print(f"gate: {'PASS' if v.ok else 'FAIL'}  ({v.reason})")
+    for pid, d in v.deltas.items():
+        print(f"  {pid}: decode {d['decode_tps']:+.1f} t/s  "
+              f"prefill {d['prefill_tps']:+.1f} t/s  rss {d['peak_rss_bytes']/1048576:+.0f} MiB")
+    print(f"  ppl {v.current_ppl:.4f} (base {v.baseline_ppl:.4f})  "
+          f"max rss {v.max_rss_bytes/1048576:.0f} MiB")
+    return 0 if v.ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_cli())

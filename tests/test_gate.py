@@ -114,3 +114,28 @@ def test_compare_no_gain_passes_but_flags_not_improved():
     cur_t, cur_p = _cur(decode=23.8)         # identical
     v = gate.compare(cur_t, cur_p, BASE)
     assert v.ok and not v.improved
+
+
+import subprocess, sys
+
+
+def test_cli_check_exit_codes(tmp_path):
+    base = tmp_path / "baseline.json"
+    base.write_text(json.dumps(BASE))
+    tput = _write(tmp_path, "throughput-x.json", {
+        "runs": [{"backend": "llama_cpp", "prompt_id": "short_qa",
+                  "decode_tps": 26.0, "prefill_tps": 199.8, "peak_rss_bytes": 190_840_832},
+                 {"backend": "llama_cpp", "prompt_id": "medium_summary",
+                  "decode_tps": 19.3, "prefill_tps": 321.9, "peak_rss_bytes": 263_192_576}],
+    })
+    ppl = _write(tmp_path, "perplexity-x.json", {
+        "runs": [{"backend": "llama_cpp", "perplexity": 8.40}]})
+    out = tmp_path / "gate.json"
+    r = subprocess.run(
+        [sys.executable, "-m", "bench.gate", "check",
+         "--current-throughput", str(tput), "--current-perplexity", str(ppl),
+         "--baseline", str(base), "--out", str(out)],
+        capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert json.loads(out.read_text())["ok"] is True
