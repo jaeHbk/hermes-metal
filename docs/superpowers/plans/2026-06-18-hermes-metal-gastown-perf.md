@@ -12,6 +12,18 @@
 
 ---
 
+## Execution notes — deviations discovered against installed `gt` 1.1.0 (Task 9, 2026-06-18)
+
+The plan's Task 9 was written before the exact Gastown 1.1.0 surface was confirmed. Verified reality:
+
+1. **A Town HQ must exist before rigs.** `gt rig …` fails with "not in a Gas Town workspace" until `gt install ~/gt` creates the HQ. Ran `gt install ~/gt --shell` (added shell integration to `~/.zshrc`; started a **Dolt** SQL server — both must be undone at teardown: `gt dolt stop`, and remove the `~/.zshrc` block).
+2. **Rig names cannot contain hyphens.** Registered as **`hermes_metal`** (underscore), not `hermes-metal`. Beads prefix `hm`.
+3. **`gt rig add` clones from the git REMOTE** (not a local path). Required pushing `feat/gastown-bench-gate` + `perf/gastown-run-1` to `github.com/jaeHbk/hermes-metal` (user-approved). Used `--branch perf/gastown-run-1` (so refinery/mayor clones sit on the integration branch) and `--local-repo` (shares local git objects for a fast clone). Verified the refinery clone (`~/gt/hermes_metal/refinery/rig`) is on `perf/gastown-run-1` at HEAD `93321b8` and contains `scripts/bench_gate.sh` + `bench/gate.py` + `baseline.json`. **Worktree isolation is intact** — Gastown works in `~/gt/hermes_metal/…`, never `~/Documents/hermes-metal`.
+4. **No per-rig custom validation-command hook in 1.1.0.** The Refinery runs its own internal "tests/builds/checks", not a configurable gate command (`gt rig config` exposes `max_polecats`, `auto_restart`, etc., but no validation key). **→ Using the plan's documented fallback:** the bench-gate is enforced as the polecat's **mandatory pre-`gt done` step** (each bead instructs: run `scripts/bench_gate.sh --full`, only `gt done` on exit 0). The human `gt mq` merge-approval is the second enforcement point. Both layers keep a regressing change off `perf/gastown-run-1`.
+5. **Concurrency cap** set to **2** via `gt rig config set hermes_metal max_polecats 2` (each polecat loads the model for bench on a 36 GiB Mac).
+
+---
+
 ## File structure
 
 | File | New? | Responsibility |
