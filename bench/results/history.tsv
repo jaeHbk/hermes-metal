@@ -1,1 +1,2 @@
 date	sha	experiment	decode_short	decode_medium	decode_long	max_rss_mib	perplexity	ok
+2026-06-18	d3ae4c6	E1-audit	-0.3	-0.8	-0.5	290	8.3215	ok
