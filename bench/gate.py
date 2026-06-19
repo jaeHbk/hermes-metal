@@ -34,3 +34,12 @@ def load_perplexity(path: str | Path) -> float:
         if r.get("backend") == LLAMA_CPP:
             return float(r["perplexity"])
     raise ValueError(f"no llama_cpp perplexity run in {path}")
+
+
+def make_baseline(throughput_path: str | Path, perplexity_path: str | Path) -> dict[str, Any]:
+    host = json.loads(Path(throughput_path).read_text()).get("host", {})
+    return {
+        "host": host,
+        "prompts": load_throughput(throughput_path),
+        "perplexity": load_perplexity(perplexity_path),
+    }

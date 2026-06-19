@@ -37,3 +37,18 @@ def test_load_perplexity_picks_llama_cpp(tmp_path):
     ]}
     path = _write(tmp_path, "perplexity-x.json", payload)
     assert gate.load_perplexity(path) == 8.4047
+
+
+def test_make_baseline_shape(tmp_path):
+    tput = _write(tmp_path, "throughput-x.json", {
+        "host": {"chip": "Apple M3 Pro"},
+        "runs": [{"backend": "llama_cpp", "prompt_id": "short_qa",
+                  "decode_tps": 23.8, "prefill_tps": 199.8, "peak_rss_bytes": 190_840_832}],
+    })
+    ppl = _write(tmp_path, "perplexity-x.json", {
+        "runs": [{"backend": "llama_cpp", "perplexity": 8.4047}],
+    })
+    base = gate.make_baseline(tput, ppl)
+    assert base["perplexity"] == 8.4047
+    assert base["prompts"]["short_qa"]["decode_tps"] == 23.8
+    assert base["host"]["chip"] == "Apple M3 Pro"
