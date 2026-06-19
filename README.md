@@ -1,6 +1,6 @@
 <img width="2388" height="1792" alt="Adobe Express - file" src="https://github.com/user-attachments/assets/4f12195d-3517-4738-87b5-e46a552c9811" />
 
-# hermes-metal
+# `hermes-metal`
 
 A zero-lag, background "second brain" for Apple Silicon. It watches a Markdown
 vault, embeds it locally, serves an 8B model over a local OpenAI-compatible
