@@ -34,6 +34,7 @@ Design posture:
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import sys
@@ -65,6 +66,77 @@ def push_enabled() -> bool:
         return notify.is_configured()
     except Exception:  # noqa: BLE001 — notify import/Syntax issues must not crash digest
         return False
+
+
+def _yaml_project_value(config_path: Optional[Path]) -> Optional[str]:
+    """Read the ``project:`` key from the vault config YAML, if present.
+
+    Mirrors ``vault_filter._load_yaml_config``'s best-effort posture: a missing
+    file, missing PyYAML, or malformed YAML simply yields ``None`` (no project)
+    rather than raising — the digest must never crash on config issues.
+    ``config_path`` defaults to ``<repo>/config/vault.yaml`` to match the
+    location ``vault_filter.build_filter`` uses.
+    """
+    if config_path is None:
+        config_path = Path(__file__).resolve().parents[1] / "config" / "vault.yaml"
+    path = Path(config_path)
+    if not path.is_file():
+        return None
+    try:
+        import yaml  # noqa: WPS433 — optional dependency, same as vault_filter
+    except ImportError:
+        return None
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 — malformed YAML must not crash the digest
+        return None
+    if not isinstance(data, dict):
+        return None
+    val = data.get("project")
+    return val if isinstance(val, str) and val.strip() else None
+
+
+def resolve_project_paths(
+    vault_path: Path, *, config_path: Optional[Path] = None
+) -> tuple[Optional[str], list[Path]]:
+    """Resolve the configured project to ``(label, note_paths)``.
+
+    Source precedence mirrors the rest of the project: the
+    ``HERMES_PROJECT_NOTE`` env var wins over the ``project:`` key in
+    ``config/vault.yaml``. The value is a path RELATIVE to the vault root and
+    may name a single note OR a folder (all ``*.md``/``*.markdown`` files
+    inside it are aggregated).
+
+    Returns ``(None, [])`` when no project is configured OR the configured
+    path does not resolve to any existing note — callers treat that as "omit
+    the section," a zero-behavior-change default.
+    """
+    raw = os.environ.get("HERMES_PROJECT_NOTE", "").strip()
+    if not raw:
+        raw = _yaml_project_value(config_path) or ""
+    raw = raw.strip()
+    if not raw:
+        return (None, [])
+
+    target = (vault_path / raw).expanduser()
+    notes: list[Path] = []
+    if target.is_dir():
+        for p in sorted(target.rglob("*")):
+            if p.is_file() and p.suffix.lower() in (".md", ".markdown"):
+                notes.append(p)
+    elif target.is_file():
+        notes.append(target)
+    else:
+        # Tolerate a missing ``.md`` extension on a single-note config value.
+        with_ext = target.with_suffix(".md")
+        if with_ext.is_file():
+            notes.append(with_ext)
+
+    if not notes:
+        return (None, [])
+    # Label: the configured value, trimmed of a trailing slash, for display.
+    label = raw.rstrip("/")
+    return (label, notes)
 
 
 # Cap on how much of each note we feed the LLM, and how many notes, so a busy
@@ -105,6 +177,12 @@ class DigestResult:
     open_questions: list[str]
     llm_ok: bool
     is_class: bool
+    # Project correlation (bead hermes_metal-1ej). ``project`` is the
+    # configured project label (None ⇒ no project configured ⇒ section
+    # omitted). ``project_correlations`` is the ranked ``(rel, score)`` list of
+    # the day's notes + newly-ingested sources by relevance to the project.
+    project: Optional[str] = None
+    project_correlations: list[tuple[str, float]] = field(default_factory=list)
 
     @property
     def headline(self) -> str:
@@ -349,6 +427,178 @@ def synthesize(
     return (learnings, practice, True)
 
 
+# ----------------------------------------------------- project correlation
+
+
+# Embed callable signature: (texts) -> list of vectors. Default uses the real
+# embedding server via the indexer; tests inject a stub. Any exception is
+# treated as "embed server down" and triggers the mechanical fallback.
+EmbedFn = Callable[[list[str]], list[list[float]]]
+
+# Cap how much of each candidate / project note we feed the scorer. The
+# mechanical path scans terms; the embed path sends text to the embed server.
+# Bounding both keeps a huge note from dominating term overlap or blowing the
+# embed request size.
+_CORR_SCAN_CHARS = 4000
+# How many ranked correlations to surface. The day's activity is usually
+# small; a handful keeps the section scannable.
+_CORR_MAX_ROWS = 8
+
+
+def _default_embed_fn() -> EmbedFn:
+    """Real embedder: route text through the indexer's embed() against the
+    configured embed server. Wrapped so any transport/HTTP error propagates as
+    a plain exception the correlation builder catches and degrades on."""
+    def _embed(texts: list[str]) -> list[list[float]]:
+        from src.backend import indexer  # noqa: WPS433 — heavy, lazy import
+
+        embed_url = os.environ.get(
+            "HERMES_EMBED_URL", indexer.DEFAULT_EMBED_URL
+        )
+        return indexer.embed(texts, embed_url, task=indexer.DOCUMENT_TASK_PREFIX)
+
+    return _embed
+
+
+def _collect_ingested_sources(
+    vault_path: Path, day: datetime
+) -> list[DigestNote]:
+    """Return wiki/sources pages whose mtime falls within ``day``.
+
+    These are the day's *newly-ingested sources* (URLs the user pasted /
+    batch-ingested), which ``collect_notes`` deliberately excludes (the wiki
+    subtree). The project correlation should still consider them, so we gather
+    them here as additional candidates with frontmatter stripped.
+    """
+    from src.backend.indexer import _FRONTMATTER_RE  # noqa: WPS433
+
+    paths = wiki.get_paths(vault_path)
+    sources_dir = paths.sources_dir
+    if not sources_dir.is_dir():
+        return []
+    start, end = _day_window(day)
+    out: list[DigestNote] = []
+    vault_root = vault_path.resolve()
+    for p in sorted(sources_dir.glob("*.md")):
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if not (start <= mtime < end):
+            continue
+        try:
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        body = _FRONTMATTER_RE.sub("", raw, count=1).lstrip("\n")
+        rp = p.resolve()
+        try:
+            rel = str(rp.relative_to(vault_root))
+        except ValueError:
+            rel = p.name
+        out.append(DigestNote(path=rp, rel=rel, mtime=mtime, text=body, tags=[]))
+    return out
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two vectors; 0.0 on degenerate input."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _mechanical_overlap(project_terms: set[str], note_text: str) -> float:
+    """Term-overlap score reusing the reranker's tokenizer.
+
+    Jaccard-style overlap of the project's terms with the note's terms,
+    normalized by the project term count and clamped to [0, 1]. This is the
+    same lexical signal the reranker uses, so the digest's degraded path and
+    the retrieval reranker agree on what "overlap" means.
+    """
+    from src.backend.reranker import _terms  # noqa: WPS433 — reuse tokenizer
+
+    if not project_terms:
+        return 0.0
+    note_terms = _terms(note_text[:_CORR_SCAN_CHARS])
+    if not note_terms:
+        return 0.0
+    matched = len(project_terms & note_terms)
+    return min(1.0, matched / len(project_terms))
+
+
+def correlate_to_project(
+    candidates: list[DigestNote],
+    project_notes: list[Path],
+    *,
+    embed_fn: Optional[EmbedFn] = None,
+) -> list[tuple[str, float]]:
+    """Rank ``candidates`` by relevance to the project notes' content.
+
+    Prefers embedding similarity (cosine of each candidate's vector against
+    the project centroid), which reuses the same embedding backend as
+    retrieval. If the embedder is unavailable (server down → raises) or no
+    ``embed_fn`` is in play, it degrades to lexical term overlap reusing
+    ``reranker``'s tokenizer — matching digest.py's existing "mechanical-only"
+    degradation. Never raises.
+
+    Returns ``[(rel, score), ...]`` sorted by descending score, capped at
+    ``_CORR_MAX_ROWS``. Zero-score candidates are dropped (no spurious links).
+    """
+    if not candidates or not project_notes:
+        return []
+
+    # Assemble project text (folder = concatenation of member notes).
+    proj_text = "\n\n".join(
+        _safe_read(p)[:_CORR_SCAN_CHARS] for p in project_notes
+    ).strip()
+    if not proj_text:
+        return []
+
+    scored: list[tuple[str, float]] = []
+
+    fn = embed_fn if embed_fn is not None else _default_embed_fn()
+    try:
+        vectors = fn([proj_text] + [c.text[:_CORR_SCAN_CHARS] for c in candidates])
+        if not vectors or len(vectors) != len(candidates) + 1:
+            raise RuntimeError("embedder returned wrong vector count")
+        proj_vec = vectors[0]
+        for cand, vec in zip(candidates, vectors[1:]):
+            scored.append((cand.rel, _cosine(proj_vec, vec)))
+    except Exception:  # noqa: BLE001 — degrade to mechanical, never crash
+        from src.backend.reranker import _terms  # noqa: WPS433
+        proj_terms = _terms(proj_text)
+        scored = [
+            (cand.rel, _mechanical_overlap(proj_terms, cand.text))
+            for cand in candidates
+        ]
+
+    # Drop the project notes themselves from the candidate list (a project
+    # note edited today would otherwise correlate ~1.0 with itself).
+    proj_rels = {str(p.resolve()) for p in project_notes}
+    ranked = [
+        (rel, score) for rel, score in scored
+        if score > 0.0
+    ]
+    ranked.sort(key=lambda t: (-t[1], t[0]))
+    return ranked[:_CORR_MAX_ROWS]
+
+
+def _safe_read(path: Path) -> str:
+    """Read a note body with frontmatter stripped; '' on any error."""
+    from src.backend.indexer import _FRONTMATTER_RE  # noqa: WPS433
+
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return _FRONTMATTER_RE.sub("", raw, count=1).lstrip("\n")
+
+
 # --------------------------------------------------------------- rendering
 
 
@@ -365,6 +615,14 @@ def _render_markdown(r: DigestResult) -> str:
     lines.append("## Learnings")
     lines.append(r.learnings.strip() or "_(nothing to synthesize)_")
     lines.append("")
+    if r.project is not None:
+        lines.append(f"## How this connects to {r.project}")
+        if r.project_correlations:
+            for rel, score in r.project_correlations:
+                lines.append(f"- [{rel}] — relevance {score:.2f}")
+        else:
+            lines.append("_No notes touched today relate to the project._")
+        lines.append("")
     if r.is_class:
         lines.append("## Practice questions")
         if r.practice_questions:
@@ -392,11 +650,34 @@ def build_digest(
     *,
     chat_fn: Optional[ChatFn] = None,
     config_path: Optional[Path] = None,
+    embed_fn: Optional[EmbedFn] = None,
 ) -> DigestResult:
     notes = collect_notes(vault_path, day, config_path=config_path)
     is_class = is_class_material(notes)
     learnings, practice, llm_ok = synthesize(notes, is_class=is_class, chat_fn=chat_fn)
     open_qs = extract_open_questions(notes)
+
+    # Project correlation (bead hermes_metal-1ej). Omitted entirely when no
+    # project is configured (zero behavior change). Candidates are the day's
+    # changed notes PLUS the day's newly-ingested sources, minus the project's
+    # own notes (a project note edited today shouldn't correlate with itself).
+    project_label, project_notes = resolve_project_paths(
+        vault_path, config_path=config_path
+    )
+    correlations: list[tuple[str, float]] = []
+    if project_label is not None:
+        project_resolved = {str(p.resolve()) for p in project_notes}
+        candidates = [
+            n for n in (notes + _collect_ingested_sources(vault_path, day))
+            if str(n.path.resolve()) not in project_resolved
+        ]
+        try:
+            correlations = correlate_to_project(
+                candidates, project_notes, embed_fn=embed_fn
+            )
+        except Exception:  # noqa: BLE001 — correlation must never crash the digest
+            correlations = []
+
     return DigestResult(
         date_iso=day.strftime("%Y-%m-%d"),
         weekday=day.strftime("%A"),
@@ -406,6 +687,8 @@ def build_digest(
         open_questions=open_qs,
         llm_ok=llm_ok,
         is_class=is_class,
+        project=project_label,
+        project_correlations=correlations,
     )
 
 
@@ -459,9 +742,19 @@ def write_digest_page(paths: wiki.WikiPaths, result: DigestResult) -> Path:
 
 
 def _push(result: DigestResult, page_path: Path) -> bool:
-    """Push headline + full digest document to Telegram. Returns True on send."""
+    """Push headline + full digest body + document to Telegram.
+
+    The message text is the headline followed by the full digest markdown so
+    the push itself (not only the attached document) carries every section —
+    including the project-correlation section when a project is configured.
+    ``notify.send`` chunks anything over Telegram's 4096-char cap on paragraph
+    boundaries. The full markdown is also attached as a document for archival.
+    Returns True on send.
+    """
     from src import notify
-    notify.send(result.headline + f"\n\nFull digest: {page_path.name}")
+    notify.send(
+        f"{result.headline}\n\nFull digest: {page_path.name}\n\n{result.to_markdown()}"
+    )
     notify.send_document(
         f"digest-{result.date_iso}.md",
         result.to_markdown().encode("utf-8"),

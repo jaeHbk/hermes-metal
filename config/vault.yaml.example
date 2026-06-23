@@ -10,6 +10,21 @@
 #
 # An env override REPLACES, does not merge — keep the lists intentional.
 
+# Optional: designate a "current project" for the daily digest. When set,
+# `hermes digest` adds a "How this connects to <project>" section that ranks
+# the day's changed notes + newly-ingested sources by relevance to the
+# project's content (embedding similarity when the embed server is up, lexical
+# term-overlap fallback when it's down). Omit the key (or leave it unset) to
+# omit the section — zero behavior change.
+#
+# The value is a path RELATIVE to the vault root and may be a single note OR a
+# folder (all *.md / *.markdown files inside it are aggregated). The
+# HERMES_PROJECT_NOTE env var overrides this key.
+#
+#   project: "projects/raft-consensus.md"     # single note
+#   project: "projects/current"               # whole folder
+# project: ""
+
 include:
   - "*.md"
   - "*.markdown"

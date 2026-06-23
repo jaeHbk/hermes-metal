@@ -14,12 +14,52 @@ retry is just re-running on that file). New pages are auto-indexed unless
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
 from src import web, ingest_cmd, wiki
 from src.server.client import HermesError
+
+
+# Match http(s) URLs embedded anywhere in free-form text (e.g. a markdown note
+# body). Trailing punctuation a sentence/markdown-link wrapper leaves on the
+# tail (``.,;:!?)]>"'`` and a closing paren) is trimmed in ``extract_urls``;
+# the character class here is intentionally permissive so we capture the whole
+# token first and clean it up afterward. This is the single URL-recognition
+# regex shared by the batch links file, the single-URL CLI path, and the
+# watcher's pasted-link auto-ingest.
+_URL_RE = re.compile(r"https?://[^\s<>)\]}\"'`]+", re.IGNORECASE)
+# Punctuation that commonly abuts a URL in prose but is not part of it.
+_URL_TRAILING_TRIM = ".,;:!?\"'`)]}>"
+
+
+def extract_urls(text: str) -> list[str]:
+    """Return de-duplicated http(s) URLs found anywhere in ``text``.
+
+    Order-preserving. Each URL has trailing sentence/markup punctuation
+    stripped (``https://x.example/a).`` → ``https://x.example/a``) so a link
+    pasted mid-sentence or inside a markdown ``[label](url)`` doesn't carry a
+    stray ``)`` or ``.`` into the fetch. The scheme is validated via
+    :func:`urllib.parse.urlparse` so only ``http``/``https`` survive.
+
+    This is the shared primitive behind the links file, the single-URL CLI,
+    and the watcher's auto-ingest of pasted links.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in _URL_RE.findall(text):
+        url = raw.rstrip(_URL_TRAILING_TRIM)
+        if not url:
+            continue
+        if urlparse(url).scheme not in ("http", "https"):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append(url)
+    return out
 
 
 def _parse_links_file(path: Path) -> list[str]:
