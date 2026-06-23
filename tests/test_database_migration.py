@@ -145,3 +145,26 @@ def test_search_metric_filter_combo(tmp_path):
     ])
     hits = v.search([1.0, 0, 0, 0], k=5, filter="mtime >= 5000")
     assert [h["id"] for h in hits] == ["new"]
+
+
+def test_all_chunks_projects_corpus_for_bm25(tmp_path):
+    """all_chunks() returns the text corpus BM25 needs, without the vector."""
+    v = LanceVault(path=tmp_path / "db", embed_dim=4)
+    v.upsert([
+        {"id": "a", "source_path": "/v/x.md", "chunk_idx": 0, "text": "alpha",
+         "mtime": 1.0, "tags": [], "heading_trail": "", "vector": [1, 0, 0, 0]},
+        {"id": "b", "source_path": "/v/y.md", "chunk_idx": 1, "text": "beta",
+         "mtime": 2.0, "tags": [], "heading_trail": "", "vector": [0, 1, 0, 0]},
+    ])
+    chunks = v.all_chunks()
+    assert len(chunks) == 2
+    # Default projection carries text + locator columns, NOT the heavy vector.
+    keys = set(chunks[0])
+    assert {"id", "source_path", "chunk_idx", "text"} <= keys
+    assert "vector" not in keys
+    assert {c["text"] for c in chunks} == {"alpha", "beta"}
+
+
+def test_all_chunks_empty_table(tmp_path):
+    v = LanceVault(path=tmp_path / "db", embed_dim=4)
+    assert v.all_chunks() == []

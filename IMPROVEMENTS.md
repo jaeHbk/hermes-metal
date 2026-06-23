@@ -8,6 +8,40 @@ Newest first. Add entries as work lands, not in batch.
 
 ---
 
+## 2026-06-23 — BM25 lexical search fallback (adopted from synto, zero resident RAM)
+
+**Problem:** `hermes search` had exactly one retrieval path — vector search,
+which needs the nomic embed server resident on :8081. When that server is down
+(or absent entirely, as on a CPU host with no Metal servers) retrieval simply
+failed. There was also no good answer for exact-term queries (error codes, file
+names, identifiers) where literal match beats semantic nearness. A comparison
+with [`kytmanov/synto`](https://github.com/kytmanov/synto) (issue hm-3c6) —
+whose thesis is "no embeddings, no vector DB; BM25 over source text" —
+surfaced this as the one feature worth adopting *because* it costs no
+steady-state memory.
+
+**Change:** Added an **opt-in** `hermes search --lexical` BM25 path.
+- `src/backend/lexical.py` — standard Okapi BM25 (k1=1.5, b=0.75, smoothed
+  non-negative IDF), pure-Python/stdlib like the reranker. Builds a
+  **transient** index from chunk text, ranks, returns top-k, then drops it.
+- `LanceVault.all_chunks()` — projects only text + locator columns (never the
+  768-float vector) so the corpus read stays cheap.
+- CLI wiring: `--lexical` flag; hits render a `bm25=` score; the vector path's
+  embed-server error now points users at `--lexical` as a fallback.
+- Tests: `tests/test_lexical.py` (14), `tests/test_cli_lexical.py` (4),
+  `all_chunks()` coverage in `tests/test_database_migration.py` (2) — 20 new,
+  all daemon-free / network-free (pass on a CPU host).
+
+**Impact:** Retrieval now works with the embed server down or absent, and is
+better at exact-term queries — at **zero steady-state RAM cost**: no persisted
+lexical index, no resident model, default 3-LaunchAgent footprint unchanged.
+The index exists only for the duration of one query. Full design rationale and
+the honest comparison (including what we declined — notably synto's two-tier
+resident 14B model, rejected on RAM grounds) live in
+[`docs/COMPARISON-synto.md`](docs/COMPARISON-synto.md). Suite: 261 → 281 green.
+
+---
+
 ## 2026-06-19 — Gastown perf harness + bench-gate (and an empirical "already near-optimal" result)
 
 **Problem:** No safe, repeatable way to try engine-level perf experiments. The

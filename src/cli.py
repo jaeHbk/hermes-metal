@@ -242,21 +242,51 @@ def _cmd_ask(args: argparse.Namespace) -> int:
     )
 
 
+def _lexical_retrieve(query: str, *, k: int) -> list[dict[str, Any]]:
+    """BM25 retrieval over chunk text — no embed server, no resident model.
+
+    The synto-inspired fallback path: build a transient BM25 index from the
+    text already in LanceDB, query it, drop it. Works when the embed server
+    is down (or absent, as on a CPU host) and shines on exact-term queries.
+    """
+    from src.backend.lexical import bm25_search
+
+    db_path = _resolve_db_path()
+    if not db_path.exists():
+        raise SystemExit(
+            f"LanceDB path does not exist: {db_path}\n"
+            "Run the watcher (it auto-creates on first event) or "
+            "edit a note in your vault."
+        )
+    vault = LanceVault(path=db_path)
+    if vault.count() == 0:
+        return []
+    return bm25_search(query, vault.all_chunks(), k=k)
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     try:
-        hits = _retrieve(args.query, k=args.k)
+        if args.lexical:
+            hits = _lexical_retrieve(args.query, k=args.k)
+        else:
+            hits = _retrieve(args.query, k=args.k)
     except httpx.HTTPError as exc:
         print(f"hermes: embed server unreachable: {exc}", file=sys.stderr)
+        print("hermes: tip: `hermes search --lexical` retrieves without the "
+              "embed server (BM25 over note text).", file=sys.stderr)
         return 1
     if not hits:
         print("(no matches)")
         return 0
     for i, h in enumerate(hits, 1):
         src = Path(h["source_path"]).name
-        score = h.get("_distance")
         header = f"[{i}] {src} #chunk{h['chunk_idx']}"
+        score = h.get("_distance")
+        bm25 = h.get("_bm25")
         if isinstance(score, (int, float)):
             header += f"   distance={score:.4f}"
+        elif isinstance(bm25, (int, float)):
+            header += f"   bm25={bm25:.4f}"
         print(header)
         print(f"    path: {h['source_path']}")
         snippet = h["text"].strip().replace("\n", " ")
@@ -324,6 +354,10 @@ def _build_parser() -> argparse.ArgumentParser:
     search = sub.add_parser("search", help="Retrieval only; prints matched chunks.")
     search.add_argument("query", help="Search query.")
     search.add_argument("-k", type=int, default=DEFAULT_K, help=f"top-k results (default {DEFAULT_K}).")
+    search.add_argument("--lexical", action="store_true",
+                        help="Use BM25 keyword search over note text instead of vector "
+                             "search. No embed server / resident model needed; best for "
+                             "exact-term queries (error codes, file names, identifiers).")
     search.set_defaults(func=_cmd_search)
 
     status = sub.add_parser("status", help="Probe both servers and show index size.")

@@ -62,7 +62,7 @@ remove agents with `make uninstall`.
 | --- | --- |
 | `hermes` | Interactive REPL (default). Multi-turn, streaming, fresh retrieval per turn. |
 | `hermes ask "<q>"` | One-shot RAG question; streams a cited answer. |
-| `hermes search "<q>"` | Retrieval only; prints matched chunks + scores. |
+| `hermes search "<q>"` | Retrieval only; prints matched chunks + scores. Add `--lexical` for BM25 keyword search (no embed server / resident model). |
 | `hermes digest` | Build a daily activity digest; file it in the wiki, optionally push it. |
 | `hermes wiki init` / `status` | Bootstrap / inspect the LLM-authored wiki. |
 | `hermes ingest <path>` / `--url <url>` | Summarize a local file or a fetched web page into `wiki/sources/`. |
@@ -106,6 +106,15 @@ widens back automatically. Candidates are then reranked by a blend of semantic
 similarity, recency (30-day half-life), and heading/term overlap before the
 top-k reaches the model. All of this degrades gracefully on an un-migrated
 index.
+
+**Lexical fallback (`--lexical`).** `hermes search --lexical` swaps vector
+retrieval for BM25 keyword search over the note text already in LanceDB — no
+embed server, no resident model. Reach for it when the embed server is down
+(or absent, e.g. on a non-Apple-Silicon box) or for exact-term queries (error
+codes, file names, identifiers) where literal match beats semantic nearness.
+The BM25 index is built per query and dropped immediately, so it adds **zero**
+steady-state memory. (Adopted from [synto](https://github.com/kytmanov/synto);
+see `docs/COMPARISON-synto.md`.)
 
 ## The wiki: compounding synthesis
 
@@ -233,9 +242,9 @@ back to system `python3` when the venv is broken. Exit 0 if ready, 1 on FAIL;
 make test     # pytest tests/ -v — pure-Python, no daemons or network
 ```
 
-206 tests cover the load-bearing pieces: chunker, schema migration, reranker,
-temporal parser, digest, conversation archive, vault filter, wiki, REPL trim,
-and SSE streaming (mocked via `httpx.MockTransport`).
+281 tests cover the load-bearing pieces: chunker, schema migration, reranker,
+BM25 lexical search, temporal parser, digest, conversation archive, vault
+filter, wiki, REPL trim, and SSE streaming (mocked via `httpx.MockTransport`).
 
 ## Benchmarks
 

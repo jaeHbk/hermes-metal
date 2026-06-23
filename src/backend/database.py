@@ -275,6 +275,26 @@ class LanceVault:
                 seen.add(v)
         return sorted(seen)
 
+    def all_chunks(self, *, columns: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return every chunk row as a dict — the corpus for lexical (BM25)
+        search.
+
+        BM25 has no persisted index; ``hermes search --lexical`` builds a
+        transient one from this corpus per query (see src/backend/lexical.py).
+        We project to the columns BM25 actually needs (``text`` for scoring,
+        ``source_path`` / ``chunk_idx`` to render hits) so we don't pull the
+        768-float vector per row into Python — keeping this read cheap and the
+        transient corpus small in line with the minimal-RAM ethos. ``to_arrow``
+        ships with the lancedb wheel (no extra dependency).
+        """
+        if self._table.count_rows() == 0:
+            return []
+        cols = columns or ["id", "source_path", "chunk_idx", "text"]
+        present = self._present_columns()
+        cols = [c for c in cols if c in present]
+        arrow_table = self._table.to_arrow().select(cols)
+        return arrow_table.to_pylist()
+
     def sources_with_stale_metadata(self) -> list[str]:
         """Distinct source_paths whose rows carry placeholder metadata.
 
