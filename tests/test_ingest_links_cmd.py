@@ -155,6 +155,25 @@ def test_batch_missing_file_returns_2(vault):
     assert rc == 2
 
 
+def test_extract_urls_from_prose():
+    """The shared prose URL extractor: order-preserving, deduped, punctuation
+    trimmed, markdown-link-safe, non-http dropped."""
+    text = (
+        "Read https://a.example/one, then see [docs](https://b.example/two).\n"
+        "Again https://a.example/one (dup) and ftp://nope.example/x.\n"
+        "Trailing dot https://c.example/three."
+    )
+    assert ingest_links_cmd.extract_urls(text) == [
+        "https://a.example/one",
+        "https://b.example/two",
+        "https://c.example/three",
+    ]
+
+
+def test_extract_urls_empty():
+    assert ingest_links_cmd.extract_urls("no links here at all") == []
+
+
 def test_batch_chat_failure_skips_and_continues(vault, no_index, monkeypatch):
     from src.server.client import HermesError
     wiki.init_wiki()

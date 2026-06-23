@@ -57,6 +57,18 @@ _MARKDOWN_PATTERNS: list[str] = ["*.md", "*.markdown"]
 _DEFAULT_EMBED_URL = "http://127.0.0.1:8081/v1/embeddings"
 
 
+def _auto_ingest_links_enabled() -> bool:
+    """Feature toggle for auto-ingesting URLs pasted into vault notes.
+
+    Default ON. ``HERMES_AUTO_INGEST_LINKS=0`` / ``false`` / ``no`` / ``off``
+    disables it. Read live (not cached) so a daemon restart picks up a change
+    without code edits — the env is consulted once per fired index, which is
+    cheap relative to the embed it sits next to.
+    """
+    raw = os.environ.get("HERMES_AUTO_INGEST_LINKS", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
 class VaultWatcher(PatternMatchingEventHandler):
     """Per-path debounced filesystem handler for an Obsidian vault.
 
@@ -181,6 +193,120 @@ class VaultWatcher(PatternMatchingEventHandler):
             self._hashes[path] = digest
         except Exception:  # noqa: BLE001 - we MUST never kill the timer thread
             logger.exception("failed to index %s", path)
+            return
+
+        # Auto-ingest any URLs pasted into the note. This runs AFTER the embed
+        # and INDEPENDENTLY: it is fully wrapped so a WebError, a chat server
+        # that's down, or any other failure logs and continues without
+        # aborting the (already-completed) embed or killing the timer thread.
+        try:
+            if _auto_ingest_links_enabled():
+                self._auto_ingest_links(target)
+        except Exception:  # noqa: BLE001 - never kill the timer thread
+            logger.exception("auto-ingest of links failed for %s", path)
+
+    # --------------------------------------------------------- auto-ingest
+
+    def _wiki_root(self) -> Path | None:
+        """Resolve the wiki subtree root, cached. ``None`` if unresolvable.
+
+        Used to skip auto-ingesting links out of hermes's OWN generated pages
+        (sources/topics/digests) so a summary that quotes a URL doesn't
+        recursively spawn another source page.
+        """
+        cached = getattr(self, "_wiki_root_cache", "unset")
+        if cached != "unset":
+            return cached
+        root: Path | None
+        try:
+            from src import wiki  # noqa: WPS433 — stdlib-light, lazy on purpose
+
+            root = wiki.get_paths(self.vault_path).root.resolve()
+        except Exception:  # noqa: BLE001 — wiki unconfigured → just don't skip
+            root = None
+        self._wiki_root_cache = root
+        return root
+
+    def _is_under_wiki(self, target: Path) -> bool:
+        root = self._wiki_root()
+        if root is None:
+            return False
+        try:
+            target.resolve().relative_to(root)
+            return True
+        except ValueError:
+            return False
+
+    def _auto_ingest_links(self, target: Path) -> None:
+        """Fetch + summarize any NEW http(s) URLs found in ``target``'s body.
+
+        Reuses the EXACT shared write path single/batch ingest use
+        (``web.fetch_article`` → ``ingest_cmd.ingest_text`` → ``wiki/sources``)
+        and the shared URL extractor from ``ingest_links_cmd``. Skips notes
+        under the wiki subtree (no self-ingest) and URLs whose source page
+        already exists (cheap pre-check so a debounce storm doesn't re-fetch).
+
+        Heavy/optional imports (``web``, ``ingest_cmd``, ``wiki``) are lazy so
+        the watcher starts and embeds even when the chat server on :8080 is
+        down — the failure surfaces only when a URL is actually summarized,
+        and is caught per-URL here.
+        """
+        if self._is_under_wiki(target):
+            logger.debug("skip auto-ingest for wiki page: %s", target)
+            return
+
+        # Lazy imports: keep `import watcher` cheap and tolerate a degraded
+        # environment where these (or their deps) aren't importable.
+        from src import web, ingest_cmd, wiki  # noqa: WPS433
+        from src.ingest_links_cmd import extract_urls, _name_from_url  # noqa: WPS433
+
+        try:
+            raw = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            logger.exception("auto-ingest: failed to read %s", target)
+            return
+
+        urls = extract_urls(raw)
+        if not urls:
+            return
+
+        paths = wiki.get_paths(self.vault_path)
+        if not wiki.is_initialized(paths):
+            logger.debug("auto-ingest: wiki not initialized; skipping links in %s", target)
+            return
+
+        for url in urls:
+            try:
+                # Cheap pre-check: if a source page for this URL's derived name
+                # already exists, skip the network fetch entirely. ingest_text
+                # would return ALREADY_EXISTS anyway, but that costs a fetch +
+                # a chat round-trip we want to avoid on every debounce.
+                from src.ingest_cmd import _slugify  # noqa: WPS433
+                pre_name = _slugify(_name_from_url(url))
+                if (paths.sources_dir / f"{pre_name}.md").exists():
+                    logger.debug("auto-ingest: source page exists, skipping %s", url)
+                    continue
+
+                art = web.fetch_article(url)
+                page_name = art.title or _name_from_url(url)
+                extra = {"source-url": url, "ingested-via": "watcher-autolink"}
+                if art.title:
+                    extra["source-title"] = art.title
+                if art.date:
+                    extra["source-date"] = art.date
+
+                res = ingest_cmd.ingest_text(
+                    art.text,
+                    page_name=page_name,
+                    source_label=url,
+                    extra_frontmatter=extra,
+                )
+                if res.status == ingest_cmd.WROTE:
+                    logger.info("auto-ingested %s -> %s", url, res.page_path.name)
+                else:
+                    logger.debug("auto-ingest %s: %s", url, res.status)
+            except Exception:  # noqa: BLE001 — one bad URL must not stop the rest
+                logger.warning("auto-ingest failed for %s (continuing)", url, exc_info=True)
 
     def _cancel_all_timers(self) -> None:
         with self._timers_lock:
